@@ -3,7 +3,6 @@ from dotenv import load_dotenv
 import nextcord
 from nextcord.ext import commands
 import random
-from keep_alive import keep_alive
 
 # --- BOT SETUP ---
 intents = nextcord.Intents.default()
@@ -36,6 +35,8 @@ class LootControlView(nextcord.ui.View):
         if num_rollers > 0:
             session["current_turn"] = (session["current_turn"] + 1) % num_rollers
 
+    # --- INSIDE THE LootControlView CLASS ---
+
     def update_components(self):
         """Dynamically adds/updates components based on session state."""
         session = loot_sessions.get(self.session_id)
@@ -43,18 +44,24 @@ class LootControlView(nextcord.ui.View):
 
         self.clear_items()
         is_picking_turn = session["current_turn"] >= 0 and len(session["rolls"]) > session["current_turn"]
-        
+
         if is_picking_turn:
-            available_items = [item for item in session["items"] if not item["assigned_to"]]
+            # Get a list of (index, item) for all unassigned items
+            available_items = [(index, item) for index, item in enumerate(session["items"]) if not item["assigned_to"]]
+
             if available_items:
-                # --- UPGRADE: Multi-select dropdown ---
-                options = [nextcord.SelectOption(label=item["name"], value=item["name"]) for item in available_items]
+                options = []
+                for index, item in available_items:
+                    # Truncate the visible LABEL to 100 chars, but use the item's INDEX as the stable VALUE
+                    label_text = (item["name"][:97] + '...') if len(item["name"]) > 100 else item["name"]
+                    options.append(nextcord.SelectOption(label=label_text, value=str(index)))
+
                 item_select = nextcord.ui.Select(
                     placeholder="Choose one or more items to claim...",
                     options=options,
                     custom_id="item_select",
                     min_values=1,
-                    max_values=len(available_items) # Allow selecting all available items
+                    max_values=len(available_items)
                 )
                 item_select.callback = self.on_item_select
                 self.add_item(item_select)
@@ -135,20 +142,22 @@ class LootControlView(nextcord.ui.View):
         session["selected_items"] = interaction.data["values"]
         await interaction.response.defer()
 
+    # --- INSIDE THE LootControlView CLASS ---
+
     async def on_assign(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
-        selected_list = session.get("selected_items")
-        if not selected_list:
+        selected_indices = session.get("selected_items") # These are now strings of indices
+        if not selected_indices:
             await interaction.response.send_message("You need to select at least one item from the dropdown first!", ephemeral=True)
             return
-        
-        # IMPORTANT: Item is assigned to the current picker, regardless of who clicked
+
         current_picker_id = session["rolls"][session["current_turn"]]["member"].id
-        for selected_name in selected_list:
-            for item in session["items"]:
-                if item["name"] == selected_name:
-                    item["assigned_to"] = current_picker_id
-        
+        for index_str in selected_indices:
+            item_index = int(index_str)
+            # Check if index is valid to prevent errors
+            if 0 <= item_index < len(session["items"]):
+                session["items"][item_index]["assigned_to"] = current_picker_id
+
         session["selected_items"] = None # Clear selection
         self._advance_turn(session)
         await self.update_message(interaction)
@@ -231,6 +240,5 @@ async def on_ready():
     print(f'Logged in as {bot.user}')
 
 # --- RUN ---
-keep_alive()
 load_dotenv() # Load the .env file
 bot.run(os.getenv("DISCORD_TOKEN"))
