@@ -171,10 +171,12 @@ class LootModal(nextcord.ui.Modal):
         self.add_item(self.loot_items)
 
     async def callback(self, interaction: nextcord.Interaction):
-        await interaction.response.send_message("Rolling for loot...", ephemeral=True, delete_after=2)
+        # Defer the interaction immediately to avoid a timeout.
+        await interaction.response.defer()
 
         invoker = interaction.user
         if not invoker.voice or not invoker.voice.channel:
+            # Since we deferred, we must use followup.send() for the first visible response.
             await interaction.followup.send("Error: You must be in a voice channel.", ephemeral=True); return
 
         members = invoker.voice.channel.members
