@@ -69,7 +69,7 @@ class LootControlView(nextcord.ui.View):
             assign_button = nextcord.ui.Button(label="Assign Selected Item(s)", style=nextcord.ButtonStyle.green, custom_id="assign_button")
             assign_button.callback = self.on_assign
             self.add_item(assign_button)
-            
+
             skip_button = nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.grey, custom_id="skip_button")
             skip_button.callback = self.on_skip
             self.add_item(skip_button)
@@ -86,24 +86,24 @@ class LootControlView(nextcord.ui.View):
     async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
         session = loot_sessions.get(self.session_id)
         if not session: return False
-        
+
         invoker_id = session["invoker_id"]
         custom_id = interaction.data.get("custom_id")
-        
+
         # Only the Loot Master can advance the turn
         if custom_id == "next_turn_button":
             if interaction.user.id != invoker_id:
                 await interaction.response.send_message("Only the Loot Master can advance the turn!", ephemeral=True)
                 return False
             return True
-        
+
         # --- UPGRADE: Loot Master can use all other controls ---
         if session["current_turn"] >= 0 and len(session["rolls"]) > session["current_turn"]:
             current_picker_id = session["rolls"][session["current_turn"]]["member"].id
             # Allow action if user is the picker OR the loot master
             if interaction.user.id == current_picker_id or interaction.user.id == invoker_id:
                 return True
-        
+
         await interaction.response.send_message("It is not your turn to act!", ephemeral=True)
         return False
 
@@ -120,18 +120,22 @@ class LootControlView(nextcord.ui.View):
         else:
             picker = session["rolls"][session["current_turn"]]["member"]
             content_message = f"**It is now {picker.mention}'s turn to pick an item!**"
-        
+
+        # --- MODIFICATION START ---
         description = ""
         for item in session["items"]:
             if item["assigned_to"]:
                 member = bot.get_user(item["assigned_to"]) or await bot.fetch_user(item["assigned_to"])
-                description += f"✅ **{item['name']}** — Assigned to {member.mention}\n"
+                # Puts "Assigned to" on a new, indented line, and adds a blank line after.
+                description += f"✅ **{item['name']}**\n> Assigned to {member.mention}\n\n"
             else:
-                description += f"❌ **{item['name']}**\n"
-        
+                # Adds a blank line after unassigned items.
+                description += f"❌ **{item['name']}**\n\n"
+        # --- MODIFICATION END ---
+
         embed = interaction.message.embeds[0]
         embed.description = description
-        
+
         self.update_components()
         await interaction.message.edit(content=content_message, embed=embed, view=self)
 
@@ -211,18 +215,18 @@ class LootModal(nextcord.ui.Modal):
 
         initial_description = ""
         for item in items_data:
-            initial_description += f"❌ **{item['name']}**\n"
+            initial_description += f"❌ **{item['name']}**\n\n" # Added double newline here for consistency
         loot_embed = nextcord.Embed(title="🎁 Loot Distribution", description=initial_description, color=nextcord.Color.dark_green())
         initial_content = "**Loot distribution is ready!** The Loot Master can start by clicking 'Next Turn'."
-        
+
         loot_message = await interaction.channel.send(content=initial_content, embed=loot_embed)
-        
+
         session_id = loot_message.id
         loot_sessions[session_id] = {
             "rolls": rolls, "items": items_data, "current_turn": -1,
             "invoker_id": invoker.id, "selected_items": None
         }
-        
+
         view = LootControlView(session_id)
         await loot_message.edit(view=view)
 
