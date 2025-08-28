@@ -88,10 +88,10 @@ To run the bot 24/7, you can deploy it to a free hosting service like Render. Th
 3.  **Create a New "Web Service"** on the Render dashboard.
 4.  **Connect Your Repository**: Select the repository you just forked.
 5.  **Configure the Service:**
-    -   **Name**: Give your service a name (e.g., `rngenie-bot`).
+    -   **Name**: Give your service a name (e.g., `rngenie`).
     -   **Environment**: `Python 3`
     -   **Build Command**: `pip install -r requirements.txt`
-    -   **Start Command**: `python RNGenie_deploy.py` (Make sure to use the `_deploy` version!)
+    -   **Start Command**: `python RNGenie_deploy.py`
 6.  **Add Your Secret Token:**
     -   Go to the "Environment" tab for your new service.
     -   Under "Secret Files", click "Add Secret File".
