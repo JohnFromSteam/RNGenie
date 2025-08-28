@@ -90,8 +90,9 @@ def build_loot_panel_message(session):
 # --- DYNAMIC UI VIEW FOR LOOT CONTROL ---
 class LootControlView(nextcord.ui.View):
     def __init__(self, session_id):
-        # FIX: Change timeout from None to a specific duration (e.g., 7200 seconds = 2 hours)
-        super().__init__(timeout=7200) 
+        # View is persistent but relies on in-memory session data.
+        # This can fail if the bot restarts.
+        super().__init__(timeout=None) 
         self.session_id = session_id
         
     def _are_items_left(self, session):
@@ -128,7 +129,6 @@ class LootControlView(nextcord.ui.View):
                 self.add_item(nextcord.ui.Select(placeholder="Choose one or more items to claim...", options=options, custom_id="item_select", min_values=1, max_values=len(available_items)))
             self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.green, emoji="✅", custom_id="assign_button"))
         
-        # FIX 2: Button text changed and emoji removed.
         start_label = "📜 Start Loot Assignment!" if session["current_turn"] == -1 else "Skip Turn"
         self.add_item(nextcord.ui.Button(label=start_label, style=nextcord.ButtonStyle.blurple, custom_id="skip_button"))
         
@@ -139,14 +139,13 @@ class LootControlView(nextcord.ui.View):
 
     async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
         session = loot_sessions.get(self.session_id)
-        if not session: return False
+        if not session:
+            await interaction.response.send_message("❌ This loot session has expired or could not be found.", ephemeral=True)
+            return False
         
-        # FIX 3: LOOT MASTER SKIP LOGIC
-        # The Loot Master can always skip the turn.
         if interaction.data.get("custom_id") == "skip_button" and interaction.user.id == session["invoker_id"]:
             return True
 
-        # Otherwise, only the current picker can act.
         if session["current_turn"] >= 0 and session["current_turn"] < len(session["rolls"]):
             current_picker_id = session["rolls"][session["current_turn"]]["member"].id
             if interaction.user.id == current_picker_id:
@@ -167,19 +166,13 @@ class LootControlView(nextcord.ui.View):
 
     async def on_item_select(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
-        # Add this check
-        if not session:
-            await interaction.response.send_message("❌ This loot session has expired or could not be found.", ephemeral=True)
-            return
+        if not session: return # Check is handled by interaction_check
         session["selected_items"] = interaction.data["values"]
         await interaction.response.defer()
 
     async def on_assign(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
-        # Add this check
-        if not session:
-            await interaction.response.send_message("❌ This loot session has expired or could not be found.", ephemeral=True)
-            return
+        if not session: return # Check is handled by interaction_check
         selected_indices = session.get("selected_items")
         if not selected_indices:
             await interaction.response.send_message("🤔 You need to select an item from the dropdown first!", ephemeral=True)
@@ -193,14 +186,24 @@ class LootControlView(nextcord.ui.View):
 
     async def on_skip(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
-        # Add this check
-        if not session:
-            await interaction.response.send_message("❌ This loot session has expired or could not be found.", ephemeral=True)
-            return
+        if not session: return # Check is handled by interaction_check
         self._advance_turn_snake(session)
         await self.update_message(interaction)
 
-# --- MODAL ---
+# --- VIEW AND MODAL FOR INITIAL SETUP ---
+
+class StartLootView(nextcord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60) # Button will be disabled after 60 seconds
+
+    @nextcord.ui.button(label="Setup Loot Items", style=nextcord.ButtonStyle.green)
+    async def setup_button(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
+        await interaction.response.send_modal(LootModal())
+        # Disable the button and stop the view after it's clicked
+        button.disabled = True
+        await interaction.message.edit(view=self)
+        self.stop()
+
 class LootModal(nextcord.ui.Modal):
     def __init__(self):
         super().__init__("Loot Distribution Setup")
@@ -208,15 +211,12 @@ class LootModal(nextcord.ui.Modal):
         self.add_item(self.loot_items)
 
     async def callback(self, interaction: nextcord.Interaction):
-        voice_channel = interaction.user.voice.channel
-        if not voice_channel:
+        if not interaction.user.voice or not interaction.user.voice.channel:
             await interaction.response.send_message("❌ You seem to have left the voice channel.", ephemeral=True)
             return
+        voice_channel = interaction.user.voice.channel
         await interaction.response.defer()
 
-        # FIX 1: MORE ROBUST VC MEMBER FETCHING
-        # Instead of chunking, we directly iterate through the guild's members list and check their voice state.
-        # This is the most reliable method and does not depend on the internal cache state.
         members = [
             member for member in interaction.guild.members 
             if not member.bot and member.voice and member.voice.channel == voice_channel
@@ -228,6 +228,7 @@ class LootModal(nextcord.ui.Modal):
 
         rolls = [{"member": m, "roll": random.randint(1, 100)} for m in members]
         rolls.sort(key=lambda x: x['roll'], reverse=True)
+        # Send the roll order to the public channel
         await interaction.channel.send(build_roll_order_message(interaction.user, rolls))
         
         items_data = [{"name": line.strip(), "assigned_to": None} for line in self.loot_items.value.split('\n') if line.strip()]
@@ -237,16 +238,24 @@ class LootModal(nextcord.ui.Modal):
 
         session = { "rolls": rolls, "items": items_data, "current_turn": -1, "invoker_id": interaction.user.id, "selected_items": None, "round": 0, "direction": 1 }
         
-        view = LootControlView(interaction.id)
+        # This interaction was for the modal, we need a new ID for the session message
+        # We will use the followup message's ID as the session ID
+        
+        # Temporarily store session with the interaction ID to build the message
+        temp_session_id = interaction.id
+        loot_sessions[temp_session_id] = session
+        
+        view = LootControlView(temp_session_id)
         message_content = build_loot_panel_message(session)
-        loot_sessions[interaction.id] = session
         view.update_components()
         
+        # Send the main loot panel message
         loot_message = await interaction.followup.send(content=message_content, view=view)
         
+        # Now, update the session ID to the actual message ID for future interactions
         view.session_id = loot_message.id
         loot_sessions[loot_message.id] = session
-        del loot_sessions[interaction.id]
+        del loot_sessions[temp_session_id]
 
 # --- SLASH COMMAND ---
 @bot.slash_command(name="loot", description="Starts a turn-based loot roll for your voice channel.")
@@ -254,7 +263,17 @@ async def loot(interaction: nextcord.Interaction):
     if not interaction.user.voice:
         await interaction.response.send_message("❌ You need to be in a voice channel to start a loot roll!", ephemeral=True)
         return
-    await interaction.response.send_modal(LootModal())
+    
+    # Immediately defer to avoid the 3-second timeout.
+    await interaction.response.defer(ephemeral=True) 
+
+    # Now send a follow-up message with the button that opens the modal.
+    view = StartLootView()
+    await interaction.followup.send(
+        "Click the button below to add the loot items and start the roll.", 
+        view=view, 
+        ephemeral=True
+    )
 
 # --- EVENT LISTENERS ---
 @bot.event
