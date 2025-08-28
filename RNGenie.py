@@ -217,26 +217,27 @@ class LootModal(nextcord.ui.Modal):
         self.add_item(self.loot_items)
 
     async def callback(self, interaction: nextcord.Interaction):
-        # Defer the response immediately to have more time for processing.
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True) # Defer immediately for safety
 
-        # Check for voice channel again in case user left while filling the modal.
         if not interaction.user.voice or not interaction.user.voice.channel:
             await interaction.followup.send("❌ You must be in a voice channel to set up a loot roll.", ephemeral=True)
             return
         
         voice_channel = interaction.user.voice.channel
-        
-        # FIX: Directly get members from the voice channel. This is more reliable.
         members = [member for member in voice_channel.members if not member.bot]
         
-        if not members:
-            await interaction.followup.send("❌ I couldn't find anyone in your voice channel. Make sure I have permissions to see the channel.", ephemeral=True)
+        # IMPROVEMENT: Give a better error message if only the invoker is found.
+        if len(members) <= 1:
+            await interaction.followup.send(
+                "❌ I can only see you in the voice channel. "
+                "Please check my permissions. I need **'View Channel'** and **'Connect'** permissions for this voice channel.", 
+                ephemeral=True
+            )
             return
 
+        # The rest of your code remains the same...
         rolls = [{"member": m, "roll": random.randint(1, 100)} for m in members]
         rolls.sort(key=lambda x: x['roll'], reverse=True)
-        # Send roll order as a separate message.
         await interaction.channel.send(build_roll_order_message(interaction.user, rolls))
         
         items_data = [{"name": line.strip(), "assigned_to": None} for line in self.loot_items.value.split('\n') if line.strip()]
@@ -244,9 +245,8 @@ class LootModal(nextcord.ui.Modal):
             await interaction.followup.send("⚠️ You must enter at least one item.", ephemeral=True)
             return
 
-        # FIX: Simplify session management by creating the final message first.
         # Send a placeholder message that we can edit later.
-        loot_message = await interaction.followup.send("Initializing loot session...")
+        loot_message = await interaction.followup.send("Initializing loot session...", ephemeral=False)
 
         session = { 
             "rolls": rolls, 
@@ -258,14 +258,12 @@ class LootModal(nextcord.ui.Modal):
             "direction": 1 
         }
         
-        # Use the message ID as the unique session ID. This is robust.
         session_id = loot_message.id
         loot_sessions[session_id] = session
         
         view = LootControlView(session_id)
         message_content = build_loot_panel_message(session)
         
-        # Now, edit the original message with the full content and view.
         await loot_message.edit(content=message_content, view=view)
 
 
