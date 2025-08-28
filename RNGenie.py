@@ -90,7 +90,8 @@ def build_loot_panel_message(session):
 # --- DYNAMIC UI VIEW FOR LOOT CONTROL ---
 class LootControlView(nextcord.ui.View):
     def __init__(self, session_id):
-        super().__init__(timeout=None)
+        # FIX: Change timeout from None to a specific duration (e.g., 7200 seconds = 2 hours)
+        super().__init__(timeout=7200) 
         self.session_id = session_id
         
     def _are_items_left(self, session):
@@ -166,11 +167,19 @@ class LootControlView(nextcord.ui.View):
 
     async def on_item_select(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
+        # Add this check
+        if not session:
+            await interaction.response.send_message("❌ This loot session has expired or could not be found.", ephemeral=True)
+            return
         session["selected_items"] = interaction.data["values"]
         await interaction.response.defer()
 
     async def on_assign(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
+        # Add this check
+        if not session:
+            await interaction.response.send_message("❌ This loot session has expired or could not be found.", ephemeral=True)
+            return
         selected_indices = session.get("selected_items")
         if not selected_indices:
             await interaction.response.send_message("🤔 You need to select an item from the dropdown first!", ephemeral=True)
@@ -184,6 +193,10 @@ class LootControlView(nextcord.ui.View):
 
     async def on_skip(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
+        # Add this check
+        if not session:
+            await interaction.response.send_message("❌ This loot session has expired or could not be found.", ephemeral=True)
+            return
         self._advance_turn_snake(session)
         await self.update_message(interaction)
 
