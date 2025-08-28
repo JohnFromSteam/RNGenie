@@ -28,8 +28,8 @@ You can run RNGenie locally for testing or deploy it to a 24/7 hosting provider 
 
 1.  **Clone the Repository:**
     ```sh
-    git clone <your-repository-url>
-    cd <repository-folder>
+    git clone https://github.com/JohnFromSteam/RNGenie.git
+    cd RNGenie
     ```
 
 2.  **Create a Virtual Environment (Recommended):**
@@ -64,7 +64,7 @@ You can run RNGenie locally for testing or deploy it to a 24/7 hosting provider 
         -   `View Channels`
         -   `Send Messages`
         -   `Read Message History`
-        -   `Connect` (Essential for seeing voice channel members)
+        -   `Connect`
     -   Copy the generated URL and paste it into your browser to invite the bot to your server.
 
 7.  **Run the Bot:**
@@ -73,6 +73,7 @@ You can run RNGenie locally for testing or deploy it to a 24/7 hosting provider 
     python RNGenie.py
     ```
     You will see a "Logged in as..." message in your terminal. The bot is now online and ready to use!
+    Type `/loot` in a text channel and enjoy!
 
 ---
 
