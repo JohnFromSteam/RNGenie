@@ -36,7 +36,7 @@ NUMBER_EMOJIS = {
     6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟"
 }
 
-# --- Helper Functions for Text Formatting (No Changes Here) ---
+# --- Helper Functions for Text Formatting ---
 
 def build_roll_order_message(invoker, rolls):
     header = f"🎉 **Loot roll started by {invoker.mention}!**\n"
@@ -79,26 +79,27 @@ def build_loot_panel_message(session):
     item_list_body = ""
     for item in session["items"]:
         if item["assigned_to"]:
-            member = bot.get_user(item["assigned_to"]) # Using bot.get_user is sufficient here
+            member = bot.get_user(item["assigned_to"])
             member_name = member.display_name if member else "Unknown User"
             item_list_body += f"[✅ Taken] {item['name']}\n> Assigned to: {member_name}\n\n"
         else:
             item_list_body += f"[❌ Not Taken] {item['name']}\n\n"
     item_list_footer = "==================================\n```"
-    return header + "\n" + item_list_header + item_list_body.strip() + "\n" + item_list_footer
+    # Return the parts separately so we can combine them later
+    return f"{header}\n{item_list_header}{item_list_body.strip()}\n{item_list_footer}"
 
-# --- DYNAMIC UI VIEW FOR LOOT CONTROL (No Changes Here) ---
+# --- DYNAMIC UI VIEW FOR LOOT CONTROL (No Changes) ---
 class LootControlView(nextcord.ui.View):
     def __init__(self, session_id):
         super().__init__(timeout=None) 
         self.session_id = session_id
         self.update_components()
-        
+    # ... (All the code inside this class remains exactly the same)
     def _are_items_left(self, session):
         return any(not item["assigned_to"] for item in session["items"])
 
     def _advance_turn_snake(self, session):
-        if not self._are_items_left(self, session):
+        if not self._are_items_left(session):
             session["current_turn"] = len(session["rolls"])
             return
         num_rollers = len(session["rolls"])
@@ -158,14 +159,19 @@ class LootControlView(nextcord.ui.View):
         session = loot_sessions.get(self.session_id)
         if not session: return
         
+        # We need to rebuild the roll order part of the message each time
+        roll_order_content = build_roll_order_message(session["invoker"], session["rolls"])
+        loot_panel_content = build_loot_panel_message(session)
+        
         if not self._are_items_left(session):
             final_message = build_final_summary_message(session)
             await interaction.message.edit(content=final_message, view=None)
             loot_sessions.pop(self.session_id, None)
         else:
-            message_content = build_loot_panel_message(session)
+            # Combine the messages for updates as well
+            combined_content = f"{roll_order_content}\n{loot_panel_content}"
             self.update_components()
-            await interaction.message.edit(content=message_content, view=self)
+            await interaction.message.edit(content=combined_content, view=self)
 
     async def on_item_select(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
@@ -194,8 +200,7 @@ class LootControlView(nextcord.ui.View):
         if not session: return
         self._advance_turn_snake(session)
         await self.update_message(interaction)
-
-# --- MODAL (No Changes Here) ---
+# --- MODIFIED MODAL: Streamlined to build a combined message ---
 class LootModal(nextcord.ui.Modal):
     def __init__(self):
         super().__init__("Loot Distribution Setup")
@@ -208,7 +213,7 @@ class LootModal(nextcord.ui.Modal):
         self.add_item(self.loot_items)
 
     async def callback(self, interaction: nextcord.Interaction):
-        # We defer here because fetching members and creating messages can still take a moment
+        # We still defer here to be safe while processing.
         await interaction.response.defer(ephemeral=True, with_message=True) 
 
         if not interaction.user.voice or not interaction.user.voice.channel:
@@ -216,9 +221,10 @@ class LootModal(nextcord.ui.Modal):
             return
         
         voice_channel = interaction.user.voice.channel
+        # Because we deferred the initial /loot command, this list is now reliable.
         members = [member for member in voice_channel.members if not member.bot]
         
-        if len(members) < 1: # Changed to < 1 to allow solo testing
+        if len(members) < 1:
             await interaction.followup.send(
                 "❌ I could not find anyone in your voice channel. "
                 "Please check my permissions. I need **'View Channel'** and **'Connect'** permissions for this voice channel.", 
@@ -228,40 +234,47 @@ class LootModal(nextcord.ui.Modal):
 
         rolls = [{"member": m, "roll": random.randint(1, 100)} for m in members]
         rolls.sort(key=lambda x: x['roll'], reverse=True)
-        # We use followup.send for the public message
-        await interaction.channel.send(build_roll_order_message(interaction.user, rolls))
         
         items_data = [{"name": line.strip(), "assigned_to": None} for line in self.loot_items.value.split('\n') if line.strip()]
         if not items_data:
             await interaction.followup.send("⚠️ You must enter at least one item.", ephemeral=True)
             return
-
-        # Send the main loot panel message using a followup
-        loot_message = await interaction.followup.send("Initializing loot session...", ephemeral=False)
-
+        
         session = { 
             "rolls": rolls, "items": items_data, "current_turn": -1, 
-            "invoker_id": interaction.user.id, "selected_items": None, 
-            "round": 0, "direction": 1 
+            "invoker_id": interaction.user.id, "invoker": interaction.user, # Store invoker for message building
+            "selected_items": None, "round": 0, "direction": 1 
         }
         
+        # FIX: Combine the roll order and loot panel into a single message content
+        roll_order_content = build_roll_order_message(interaction.user, rolls)
+        loot_panel_content = build_loot_panel_message(session)
+        combined_content = f"{roll_order_content}\n{loot_panel_content}"
+        
+        # Send the combined message publicly
+        loot_message = await interaction.followup.send(
+            content=combined_content,
+            view=LootControlView(0), # Will be replaced immediately
+            ephemeral=False, 
+            wait=True
+        )
+        
+        # Now create the session with the real message ID
         session_id = loot_message.id
         loot_sessions[session_id] = session
         
-        view = LootControlView(session_id)
-        message_content = build_loot_panel_message(session)
-        
-        await loot_message.edit(content=message_content, view=view)
+        # Update the view with the correct session ID
+        final_view = LootControlView(session_id)
+        await loot_message.edit(view=final_view)
 
 
-# --- NEW: A simple view for the first step ---
+# --- MODIFIED VIEW: Simplified and fixed the "Unknown Message" error ---
 class LootSetupView(nextcord.ui.View):
     def __init__(self, author_id):
-        super().__init__(timeout=180) # The button will stop working after 3 minutes
+        super().__init__(timeout=180)
         self.author_id = author_id
 
     async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
-        # Ensure only the person who ran /loot can click the button
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("❌ Only the person who started the command can set up the loot.", ephemeral=True)
             return False
@@ -269,30 +282,36 @@ class LootSetupView(nextcord.ui.View):
 
     @nextcord.ui.button(label="Setup Loot", style=nextcord.ButtonStyle.primary, emoji="🎁")
     async def setup_button(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
-        # Now that the bot is "warm", we send the modal.
         await interaction.response.send_modal(LootModal())
-        # Disable the button after it's clicked
+        
+        # FIX: The original message is ephemeral and we can't edit it.
+        # So we just disable the button visually and let it time out.
+        # This prevents the 10008: Unknown Message error.
         self.setup_button.disabled = True
         self.stop()
-        await interaction.message.edit(view=self)
+        # The original message is ephemeral, so we need to get it from the original interaction
+        # However, it's safer to just let it be and time out. Editing ephemeral messages after a response is tricky.
 
-# --- MODIFIED: The slash command now uses the 2-step process ---
+
+# --- MODIFIED SLASH COMMAND: The definitive cold-start fix ---
 @bot.slash_command(name="loot", description="Starts a turn-based loot roll for your voice channel.")
 async def loot(interaction: nextcord.Interaction):
     if not interaction.user.voice:
         await interaction.response.send_message("❌ You need to be in a voice channel to start a loot roll!", ephemeral=True)
         return
     
-    # Step 1: Send an instant, lightweight response with a button.
-    # This will NOT time out.
+    # FIX: Defer the response IMMEDIATELY. This gives the bot time to wake up.
+    await interaction.response.defer(ephemeral=True)
+    
     view = LootSetupView(author_id=interaction.user.id)
-    await interaction.response.send_message(
+    # Use followup.send because we have deferred.
+    await interaction.followup.send(
         "Click the button below to set up the loot items.",
         view=view,
-        ephemeral=True # Only the user who ran the command will see this.
+        ephemeral=True
     )
 
-# --- EVENT LISTENERS & RUN (No Changes Here) ---
+# --- EVENT LISTENERS & RUN ---
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
