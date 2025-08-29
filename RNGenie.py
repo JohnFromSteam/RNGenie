@@ -27,19 +27,11 @@ NUMBER_EMOJIS = {
 }
 
 # ANSI color codes for direct color control in Discord 'ansi' code blocks.
-# 0m resets to default.
-# 31m is red.
-# 32m is green.
-# 33m is yellow/orange.
-# 34m is blue.
-# 35m is magenta/pink.
-# 36m is cyan.
-# 37m is white.
 ANSI_RESET = "\u001b[0m"
-ANSI_HEADER = "\u001b[0;33m"
-ANSI_USER = "\u001b[0;34m"
-ANSI_NOT_TAKEN = "\u001b[0;31m"
-ANSI_ASSIGNED = "\u001b[0;32m"
+ANSI_HEADER = "\u001b[0;33m"      # Yellow/Orange
+ANSI_USER = "\u001b[0;34m"        # Blue
+ANSI_NOT_TAKEN = "\u001b[0;31m"  # Red
+ANSI_ASSIGNED = "\u001b[0;32m"    # Green
 
 
 # ===================================================================================================
@@ -56,7 +48,6 @@ def build_dynamic_loot_message(session):
 
     # --- Part 1: Roll Order Header ---
     header = f"🎉 **Loot roll started by {invoker.mention}!**\n"
-    # Using 'ansi' for direct color control.
     roll_order_header = f"```ansi\n{ANSI_HEADER}# Roll Order #{ANSI_RESET}\n==================================\n"
     roll_order_body = ""
     for i, r in enumerate(rolls):
@@ -79,10 +70,10 @@ def build_dynamic_loot_message(session):
     for i, roll_info in enumerate(rolls):
         member = roll_info["member"]
         num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        distribution_body += f"==================================\n{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n\n"
+        distribution_body += f"==================================\n[{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}]\n\n"
         if member.id in assigned_items:
             for item_name in assigned_items[member.id]:
-                distribution_body += f"{ANSI_ASSIGNED}[✅ Assigned]{ANSI_RESET} {item_name}\n"
+                distribution_body += f"{ANSI_ASSIGNED}✅ Assigned :{ANSI_RESET} {item_name}\n"
 
     distribution_footer = "==================================\n```"
     distribution_section = distribution_header + distribution_body + distribution_footer
@@ -96,8 +87,7 @@ def build_dynamic_loot_message(session):
         remaining_header = f"```ansi\n{ANSI_HEADER}# Remaining Loot Items #{ANSI_RESET}\n==================================\n"
         remaining_body = ""
         for item in remaining_items:
-            # Color the '[❌ Not Taken]' tag orange, leave the item name white.
-            remaining_body += f"{ANSI_NOT_TAKEN}[❌ Not Taken]{ANSI_RESET} {item['name']}\n"
+            remaining_body += f"{ANSI_NOT_TAKEN}❌ Not Taken :{ANSI_RESET} {item['name']}\n"
         remaining_footer = "==================================\n```"
         remaining_section = remaining_header + remaining_body + remaining_footer
 
