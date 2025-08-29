@@ -35,14 +35,11 @@ ANSI_ASSIGNED = "\u001b[0;32m"    # Green
 
 
 # ===================================================================================================
-# UNIFIED MESSAGE BUILDER
+# UNIFIED MESSAGE BUILDERS
 # ===================================================================================================
 
 def build_dynamic_loot_message(session):
-    """
-    Constructs the entire dynamic message content, including roll order,
-    live distribution, remaining items, and the current turn status.
-    """
+    """Builds the main, interactive loot message."""
     invoker = session["invoker"]
     rolls = session["rolls"]
 
@@ -63,8 +60,7 @@ def build_dynamic_loot_message(session):
     for item in session["items"]:
         if item["assigned_to"]:
             assignee_id = item["assigned_to"]
-            if assignee_id not in assigned_items:
-                assigned_items[assignee_id] = []
+            if assignee_id not in assigned_items: assigned_items[assignee_id] = []
             assigned_items[assignee_id].append(item["name"])
 
     for i, roll_info in enumerate(rolls):
@@ -74,14 +70,12 @@ def build_dynamic_loot_message(session):
         if member.id in assigned_items:
             for item_name in assigned_items[member.id]:
                 distribution_body += f"{ANSI_ASSIGNED}✅ Assigned :{ANSI_RESET} {item_name}\n"
-
     distribution_footer = "==================================\n```"
     distribution_section = distribution_header + distribution_body + distribution_footer
 
     # --- Part 3: Remaining Loot & Footer ---
     remaining_items = [item for item in session["items"] if not item["assigned_to"]]
-    remaining_section = ""
-    footer = ""
+    remaining_section, footer = "", ""
 
     if remaining_items:
         remaining_header = f"```ansi\n{ANSI_HEADER}# Remaining Loot Items #{ANSI_RESET}\n==================================\n"
@@ -90,7 +84,6 @@ def build_dynamic_loot_message(session):
             remaining_body += f"{ANSI_NOT_TAKEN}❌ Not Taken :{ANSI_RESET} {item['name']}\n"
         remaining_footer = "==================================\n```"
         remaining_section = remaining_header + remaining_body + remaining_footer
-
         if session["current_turn"] >= 0:
             picker = session["rolls"][session["current_turn"]]["member"]
             footer = f"📜 **It is now {picker.mention}'s turn to pick! (Round {session['round'] + 1})**"
@@ -98,8 +91,44 @@ def build_dynamic_loot_message(session):
             footer = "🎁 **Loot distribution is ready! Click 'Start Loot Assignment!' to begin.**"
     else:
         footer = "✅ **All items have been assigned! Looting has concluded!**"
-
     return f"{roll_order_section}\n{distribution_section}\n{remaining_section}\n{footer}"
+
+def build_timeout_message(session):
+    """Builds the summary message for when a loot session times out."""
+    header = "⌛ **The loot session has timed out due to 30 minutes of inactivity!**\n"
+    
+    # --- Final Loot Distribution Section ---
+    distribution_header = f"```ansi\n{ANSI_HEADER}# Final Loot Distribution #{ANSI_RESET}\n"
+    distribution_body = ""
+    assigned_items = {}
+    for item in session["items"]:
+        if item["assigned_to"]:
+            assignee_id = item["assigned_to"]
+            if assignee_id not in assigned_items: assigned_items[assignee_id] = []
+            assigned_items[assignee_id].append(item["name"])
+
+    for i, roll_info in enumerate(rolls):
+        member = roll_info["member"]
+        num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
+        distribution_body += f"==================================\n[{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}]\n\n"
+        if member.id in assigned_items:
+            for item_name in assigned_items[member.id]:
+                distribution_body += f"{ANSI_ASSIGNED}✅ Assigned :{ANSI_RESET} {item_name}\n"
+    distribution_footer = "==================================\n```"
+    distribution_section = distribution_header + distribution_body + distribution_footer
+
+    # --- Unclaimed Items Section ---
+    remaining_items = [item for item in session["items"] if not item["assigned_to"]]
+    remaining_section = ""
+    if remaining_items:
+        remaining_header = f"```ansi\n{ANSI_HEADER}# Unclaimed Items #{ANSI_RESET}\n==================================\n"
+        remaining_body = ""
+        for item in remaining_items:
+            remaining_body += f"{ANSI_NOT_TAKEN}❌ Not Taken :{ANSI_RESET} {item['name']}\n"
+        remaining_footer = "==================================\n```"
+        remaining_section = remaining_header + remaining_body + remaining_footer
+
+    return f"{header}\n{distribution_section}\n{remaining_section}"
 
 
 # ===================================================================================================
@@ -108,11 +137,11 @@ def build_dynamic_loot_message(session):
 
 class LootControlView(nextcord.ui.View):
     """
-    Manages the interactive components (buttons, dropdowns) of the loot message.
-    Only the original invoker (Loot Master) can interact with these components.
+    Manages the interactive components of the loot message and handles timeouts.
     """
     def __init__(self, session_id):
-        super().__init__(timeout=None) 
+        # The view will time out after 30 minutes (1800 seconds) of inactivity.
+        super().__init__(timeout=1800) 
         self.session_id = session_id
         self.update_components()
 
@@ -196,6 +225,26 @@ class LootControlView(nextcord.ui.View):
         else:
             await interaction.message.edit(content=content, view=self)
 
+    async def on_timeout(self):
+        """Called when the view's 30-minute timer expires due to inactivity."""
+        session = loot_sessions.get(self.session_id)
+        if not session:
+            return
+
+        try:
+            # Fetch the original message to edit it with the timeout summary.
+            channel = bot.get_channel(session["channel_id"])
+            if channel:
+                message = await channel.fetch_message(self.session_id)
+                timeout_content = build_timeout_message(session)
+                await message.edit(content=timeout_content, view=None)
+        except (nextcord.NotFound, nextcord.Forbidden):
+            # The message may have been deleted, or we lack permissions.
+            pass
+        finally:
+            # Always clean up the session from memory after timeout.
+            loot_sessions.pop(self.session_id, None)
+
     # --- UI Component Callbacks ---
 
     async def on_item_select(self, interaction: nextcord.Interaction):
@@ -250,8 +299,7 @@ class LootModal(nextcord.ui.Modal):
 
     async def callback(self, interaction: nextcord.Interaction):
         """
-        This function is executed after the user submits the modal.
-        It gathers all necessary data and creates the initial loot session message.
+        Executed after modal submission. Gathers data and creates the initial loot session message.
         """
         await interaction.response.defer()
 
@@ -284,12 +332,15 @@ class LootModal(nextcord.ui.Modal):
         initial_content = build_dynamic_loot_message(session)
         loot_message = await interaction.followup.send(
             content=initial_content,
-            view=LootControlView(0),
+            view=LootControlView(0), # Placeholder view
             wait=True
         )
         
+        # Update the session with the real message and channel ID, and attach the final view.
         session_id = loot_message.id
+        session["channel_id"] = loot_message.channel.id # Store for timeout handler
         loot_sessions[session_id] = session
+        
         final_view = LootControlView(session_id)
         await loot_message.edit(view=final_view)
 
