@@ -10,6 +10,7 @@ RNGenie is a powerful yet easy-to-use Discord bot designed to manage turn-based 
 -   **Fair Snake Draft System**: The turn order is a "snake draft" (e.g., 1 -> 2 -> 3, then 3 -> 2 -> 1, then 1 -> 2 -> 3, etc.) to ensure fairness, giving the players at the end of the order a double-pick.
 -   **Live Updating UI**: A single, clean message is created that updates in place as loot is assigned, preventing chat spam.
 -   **Loot Master Control**: Only the person who initiated the `/loot` command can assign items or skip turns, giving them full control.
+-   **Automatic Timeout**: After 30 minutes, the loot bot will conclude the looting and show the remaining loot items as well as the assigned items.
 -   **Fully Customizable Colors**: Easily change the color of headers, usernames, and tags using ANSI color codes at the top of the script.
 
 ---
