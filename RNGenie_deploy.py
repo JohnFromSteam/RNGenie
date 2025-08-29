@@ -92,10 +92,10 @@ def build_dynamic_loot_message(session):
     for i, roll_info in enumerate(rolls):
         member = roll_info["member"]
         num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        distribution_body += f"==================================\n{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n\n"
+        distribution_body += f"==================================\n[{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}]\n\n"
         if member.id in assigned_items:
             for item_name in assigned_items[member.id]:
-                distribution_body += f"{ANSI_ASSIGNED}[✅ Assigned]{ANSI_RESET} {item_name}\n"
+                distribution_body += f"{ANSI_ASSIGNED}✅ Assigned :{ANSI_RESET} {item_name}\n"
 
     distribution_footer = "==================================\n```"
     distribution_section = distribution_header + distribution_body + distribution_footer
@@ -109,7 +109,7 @@ def build_dynamic_loot_message(session):
         remaining_header = f"```ansi\n{ANSI_HEADER}# Remaining Loot Items #{ANSI_RESET}\n==================================\n"
         remaining_body = ""
         for item in remaining_items:
-            remaining_body += f"{ANSI_NOT_TAKEN}[❌ Not Taken]{ANSI_RESET} {item['name']}\n"
+            remaining_body += f"{ANSI_NOT_TAKEN}❌ Not Taken :{ANSI_RESET} {item['name']}\n"
         remaining_footer = "==================================\n```"
         remaining_section = remaining_header + remaining_body + remaining_footer
 
