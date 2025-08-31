@@ -368,7 +368,7 @@ class LootModal(nextcord.ui.Modal):
         super().__init__("RNGenie Loot Setup")
         self.loot_items = nextcord.ui.TextInput(
             label="List Your Loot Items Below (One Per Line)", 
-            placeholder="Each new line with text is an item (even this line)\nOld Republic Jedi Master Cloak\nThunderfury, Blessed Blade of the Windseeker...", 
+            placeholder="Each new line with text is an item (even this line)\nOld Republic Jedi Master Cloak", 
             required=True, 
             style=nextcord.TextInputStyle.paragraph,
             max_length=1200
