@@ -35,37 +35,38 @@ ANSI_ASSIGNED = "\u001b[0;32m"
 
 
 # ===================================================================================================
-# EMBED MESSAGE BUILDERS
+# UNIFIED MESSAGE BUILDER
 # ===================================================================================================
 
-def build_main_panel_embed(session, timed_out=False):
-    """Builds the primary message with roll order, assigned items, and controls."""
+def build_dynamic_loot_message(session, timed_out=False):
+    """Builds the entire dynamic message content in a single, character-limit-safe message."""
     invoker = session["invoker"]
     rolls = session["rolls"]
 
-    # --- Part 1: Main Embed & Description ---
+    # --- Part 1: Header ---
     if timed_out:
-        description = f"⌛ **The loot session has timed out due to 30 minutes of inactivity!**"
+        header = "⌛ **The loot session has timed out due to 30 minutes of inactivity!**\n\n"
     elif not any(not item["assigned_to"] for item in session["items"]):
-        description = f"✅ **All items have been assigned! Looting has concluded!**"
+        header = "✅ **All items have been assigned! Looting has concluded!**\n\n"
     else:
-        description = f"🎉 **Loot roll started by {invoker.mention}!**"
+        header = f"🎉 **Loot roll started by {invoker.mention}!**\n\n"
 
-    embed = nextcord.Embed(description=description, color=nextcord.Color.dark_gold())
-
-    # --- Part 2: Roll Order Field ---
+    # --- Part 2: Roll Order ---
+    roll_order_header = f"```ansi\n{ANSI_HEADER}# Roll Order #{ANSI_RESET}\n==================================\n"
     roll_order_body = ""
     for i, r in enumerate(rolls):
         num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        roll_order_body += f"{num_emoji} {r['member'].display_name} (Roll: {r['roll']})\n"
-    embed.add_field(name="🔢 Roll Order 🔢", value=roll_order_body, inline=False)
+        roll_order_body += f"{num_emoji} {ANSI_USER}{r['member'].display_name}{ANSI_RESET} ({r['roll']})\n"
+    roll_order_footer = "==================================\n```"
+    roll_order_section = roll_order_header + roll_order_body + roll_order_footer
 
-    # --- Part 3: Assigned Items Field ---
+    # --- Part 3: Assigned Items ---
     assigned_header_text = "✅ Assigned Items ✅"
     if timed_out:
         assigned_header_text = "✅ Final Assigned Items ✅"
-    
-    assigned_items_body = ""
+        
+    distribution_header = f"```ansi\n{ANSI_HEADER}{assigned_header_text}{ANSI_RESET}\n"
+    distribution_body = ""
     assigned_items = {}
     for item in session["items"]:
         if item["assigned_to"]:
@@ -73,83 +74,44 @@ def build_main_panel_embed(session, timed_out=False):
             if assignee_id not in assigned_items: assigned_items[assignee_id] = []
             assigned_items[assignee_id].append(item["name"])
 
-    if not assigned_items:
-        assigned_items_body = "No items assigned yet."
-    else:
-        for i, roll_info in enumerate(rolls):
-            member = roll_info["member"]
-            if member.id in assigned_items:
-                num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-                assigned_items_body += f"**{num_emoji} {member.display_name}**\n"
-                for item_name in assigned_items[member.id]:
-                    assigned_items_body += f"└ {item_name}\n"
-    embed.add_field(name=assigned_header_text, value=assigned_items_body, inline=False)
+    for i, roll_info in enumerate(rolls):
+        member = roll_info["member"]
+        num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
+        distribution_body += f"==================================\n[{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}]\n\n"
+        if member.id in assigned_items:
+            for item_name in assigned_items[member.id]:
+                distribution_body += f"{item_name}\n"
+    distribution_footer = "==================================\n```"
+    distribution_section = distribution_header + distribution_body + distribution_footer
 
-    # --- Part 4: Unclaimed Items (only on timeout/finish) ---
-    if timed_out or not any(not item["assigned_to"] for item in session["items"]):
-        remaining_items = [item for item in session["items"] if not item["assigned_to"]]
-        if remaining_items:
-            header_text = "❌ Unclaimed Items ❌"
-            
-            item_fields = []
-            current_field = ""
-            for item in remaining_items:
-                line = f"{item['name']}\n"
-                if len(current_field) + len(line) > 1024:
-                    item_fields.append(current_field)
-                    current_field = ""
-                current_field += line
-            item_fields.append(current_field)
-
-            for i, field_content in enumerate(item_fields):
-                field_name = header_text
-                if len(item_fields) > 1:
-                    field_name += f" ({i+1}/{len(item_fields)})"
-                embed.add_field(name=field_name, value=field_content, inline=False)
-
-    # --- Part 5: Footer ---
-    if not timed_out and any(not item["assigned_to"] for item in session["items"]):
-        if session["current_turn"] >= 0:
-            picker = session["rolls"][session["current_turn"]]["member"]
-            direction_text = "Normal Order" if session["direction"] == 1 else "Reverse Order"
-            picker_emoji = NUMBER_EMOJIS.get(session['current_turn'] + 1, "👉")
-            turn_text = "turn again!" if session.get("just_reversed", False) else "turn!"
-            footer_text = (
-                f"Round {session['round'] + 1} ({direction_text}) | {picker_emoji} It is now {picker.mention}'s {turn_text}\n"
-                f"Loot Master {invoker.display_name} must select or skip."
-            )
-            embed.set_footer(text=footer_text)
-        else:
-            embed.set_footer(text=f"Loot is ready! {invoker.display_name} must click 'Start Loot Assignment!' to begin.")
-            
-    return embed
-
-def build_remaining_items_embed(session):
-    """Builds the separate embed for the list of remaining items."""
+    # --- Part 4: Remaining Items & Footer ---
     remaining_items = [item for item in session["items"] if not item["assigned_to"]]
-    if not remaining_items:
-        return None
+    remaining_section, footer = "", ""
 
-    embed = nextcord.Embed(color=nextcord.Color.dark_grey())
-    header_text = "❌ Remaining Loot Items ❌"
-    
-    item_fields = []
-    current_field = ""
-    for item in remaining_items:
-        line = f"{item['name']}\n"
-        if len(current_field) + len(line) > 1024:
-            item_fields.append(current_field)
-            current_field = ""
-        current_field += line
-    item_fields.append(current_field)
+    if remaining_items:
+        header_text = "❌ Remaining Loot Items ❌" if not timed_out else "❌ Unclaimed Items ❌"
+        remaining_header = f"```ansi\n{ANSI_HEADER}{header_text}{ANSI_RESET}\n==================================\n"
+        remaining_body = ""
+        for item in remaining_items:
+            remaining_body += f"{item['name']}\n"
+        remaining_footer = "==================================\n```"
+        remaining_section = remaining_header + remaining_body + remaining_footer
+        
+        if not timed_out:
+            if session["current_turn"] >= 0:
+                picker = session["rolls"][session["current_turn"]]["member"]
+                direction_text = "Normal Order" if session["direction"] == 1 else "Reverse Order"
+                picker_emoji = NUMBER_EMOJIS.get(session['current_turn'] + 1, "👉")
+                turn_text = "turn again!" if session.get("just_reversed", False) else "turn!"
+                footer = (
+                    f"🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
+                    f"**{picker_emoji} {picker.mention}'s {turn_text} **\n\n"
+                    f"✍️ **{invoker.mention} must select\nor skip for {picker.mention}**"
+                )
+            else:
+                footer = f"🎁 **Loot distribution is ready!\n\n✍️{invoker.mention} must click below to begin.\n**"
 
-    for i, field_content in enumerate(item_fields):
-        field_name = header_text
-        if len(item_fields) > 1:
-            field_name += f" ({i+1}/{len(item_fields)})"
-        embed.add_field(name=field_name, value=field_content, inline=False)
-
-    return embed
+    return f"{header}{roll_order_section}\n{distribution_section}\n{remaining_section}\n{footer}"
 
 
 # ===================================================================================================
@@ -236,27 +198,14 @@ class LootControlView(nextcord.ui.View):
         session = loot_sessions.get(self.session_id)
         if not session: return
         
-        main_panel_embed = build_main_panel_embed(session)
-        remaining_items_embed = build_remaining_items_embed(session)
+        content = build_dynamic_loot_message(session)
         self.update_components()
         
-        await interaction.message.edit(embed=main_panel_embed, view=self)
-
-        remaining_message = session.get("remaining_message")
-        if remaining_message:
-            try:
-                if remaining_items_embed:
-                    await remaining_message.edit(embed=remaining_items_embed)
-                else:
-                    await remaining_message.delete()
-                    session["remaining_message"] = None
-            except nextcord.NotFound:
-                session["remaining_message"] = None
-
         if not self._are_items_left(session):
-            final_embed = build_main_panel_embed(session)
-            await interaction.message.edit(embed=final_embed, view=None)
+            await interaction.message.edit(content=content, view=None)
             loot_sessions.pop(self.session_id, None)
+        else:
+            await interaction.message.edit(content=content, view=self)
 
     async def on_timeout(self):
         session = loot_sessions.get(self.session_id)
@@ -264,12 +213,9 @@ class LootControlView(nextcord.ui.View):
         try:
             channel = bot.get_channel(session["channel_id"])
             if channel:
-                main_message = await channel.fetch_message(self.session_id)
-                final_embed = build_main_panel_embed(session, timed_out=True)
-                await main_message.edit(embed=final_embed, view=None)
-
-                if session.get("remaining_message"):
-                    await session["remaining_message"].delete()
+                message = await channel.fetch_message(self.session_id)
+                final_content = build_dynamic_loot_message(session, timed_out=True)
+                await message.edit(content=final_content, view=None)
         except (nextcord.NotFound, nextcord.Forbidden):
             pass
         finally:
@@ -319,7 +265,6 @@ class LootControlView(nextcord.ui.View):
 # ===================================================================================================
 
 class LootModal(nextcord.ui.Modal):
-    """A pop-up window that prompts the user to enter the list of loot items."""
     def __init__(self):
         super().__init__("RNGenie Loot Setup!")
         self.loot_items = nextcord.ui.TextInput(
@@ -331,7 +276,6 @@ class LootModal(nextcord.ui.Modal):
         self.add_item(self.loot_items)
 
     async def callback(self, interaction: nextcord.Interaction):
-        """Executed after modal submission. Gathers data and creates the initial loot session message."""
         await interaction.response.defer(ephemeral=True)
         if not interaction.user.voice or not interaction.user.voice.channel:
             await interaction.followup.send("❌ You must be in a voice channel to set up a loot roll.", ephemeral=True)
@@ -360,27 +304,19 @@ class LootModal(nextcord.ui.Modal):
             "rolls": rolls, "items": items_data, "current_turn": -1, 
             "invoker_id": interaction.user.id, "invoker": interaction.user,
             "selected_items": None, "round": 0, "direction": 1,
-            "just_reversed": False, "remaining_message": None
+            "just_reversed": False
         }
         
-        main_message = await interaction.followup.send("`Initializing Main Panel...`", wait=True)
-        remaining_message = await interaction.channel.send("`Loading Item List...`")
+        loot_message = await interaction.followup.send("`Initializing Loot Session...`", wait=True)
         
-        panel_embed = build_main_panel_embed(session)
-        remaining_embed = build_remaining_items_embed(session)
-
-        session_id = main_message.id
-        session["channel_id"] = main_message.channel.id
-        session["remaining_message"] = remaining_message
+        initial_content = build_dynamic_loot_message(session)
+        
+        session_id = loot_message.id
+        session["channel_id"] = loot_message.channel.id
         loot_sessions[session_id] = session
         
         final_view = LootControlView(session_id)
-
-        await main_message.edit(content=None, embed=panel_embed, view=final_view)
-        if remaining_embed and remaining_message:
-            await remaining_message.edit(content=None, embed=remaining_embed)
-        elif remaining_message:
-            await remaining_message.delete()
+        await loot_message.edit(content=initial_content, view=final_view)
 
 
 # ===================================================================================================
@@ -389,7 +325,6 @@ class LootModal(nextcord.ui.Modal):
 
 @bot.slash_command(name="loot", description="Starts a turn-based loot roll for your voice channel.")
 async def loot(interaction: nextcord.Interaction):
-    """The entry point for the loot command."""
     if not interaction.user.voice:
         await interaction.response.send_message("❌ You need to be in a voice channel to start a loot roll!", ephemeral=True)
         return
@@ -403,7 +338,6 @@ async def loot(interaction: nextcord.Interaction):
 
 @bot.event
 async def on_ready():
-    """Event that fires when the bot successfully logs in."""
     print(f'Logged in as {bot.user}')
     print('RNGenie is ready for local debugging.')
     print('------')
