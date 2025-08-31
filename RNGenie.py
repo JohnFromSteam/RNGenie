@@ -149,6 +149,10 @@ def build_remaining_items_embed(session):
 # DYNAMIC UI VIEW (BUTTONS & DROPDOWNS)
 # ===================================================================================================
 
+# ===================================================================================================
+# DYNAMIC UI VIEW (BUTTONS & DROPDOWNS)
+# ===================================================================================================
+
 class LootControlView(nextcord.ui.View):
     def __init__(self, session_id):
         super().__init__(timeout=1800) 
@@ -180,27 +184,43 @@ class LootControlView(nextcord.ui.View):
         session = loot_sessions.get(self.session_id)
         self.clear_items()
         if not session or not self._are_items_left(session): return
+
         is_picking_turn = session["current_turn"] >= 0 and session["current_turn"] < len(session["rolls"])
         if is_picking_turn:
             available_items = [(index, item) for index, item in enumerate(session["items"]) if not item["assigned_to"]]
+            
+            # NEW LOGIC: Handle more than 25 items by creating multiple dropdowns.
             if available_items:
-                options = []
-                selected_values = session.get("selected_items") or []
-                for index, item in available_items:
-                    is_selected = str(index) in selected_values
-                    options.append(nextcord.SelectOption(label=(item["name"][:97] + '...') if len(item["name"]) > 100 else item["name"], value=str(index), default=is_selected))
-                self.add_item(nextcord.ui.Select(placeholder="Choose one or more items to claim...", options=options, custom_id="item_select", min_values=0, max_values=len(available_items)))
+                item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
+                for i, chunk in enumerate(item_chunks):
+                    options = []
+                    selected_values = session.get("selected_items") or []
+                    for index, item in chunk:
+                        is_selected = str(index) in selected_values
+                        options.append(nextcord.SelectOption(label=(item["name"][:97] + '...') if len(item["name"]) > 100 else item["name"], value=str(index), default=is_selected))
+                    
+                    placeholder = "Choose one or more items to claim..."
+                    if len(item_chunks) > 1:
+                        start_num = i * 25 + 1
+                        end_num = i * 25 + len(chunk)
+                        placeholder = f"Choose items ({start_num}-{end_num})..."
+
+                    self.add_item(nextcord.ui.Select(placeholder=placeholder, options=options, custom_id=f"item_select_{i}", min_values=0, max_values=len(options)))
+
             assign_button_disabled = not session.get("selected_items")
             self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.green, emoji="✅", custom_id="assign_button", disabled=assign_button_disabled))
+        
         if session["current_turn"] == -1:
             self.add_item(nextcord.ui.Button(label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="skip_button"))
         else:
             self.add_item(nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button"))
+        
+        # Re-register callbacks for all components.
         for child in self.children:
             if hasattr(child, 'custom_id'):
                 if child.custom_id == "assign_button": child.callback = self.on_assign
                 if child.custom_id == "skip_button": child.callback = self.on_skip
-                if child.custom_id == "item_select": child.callback = self.on_item_select
+                if "item_select" in child.custom_id: child.callback = self.on_item_select
 
     async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
         session = loot_sessions.get(self.session_id)
@@ -216,28 +236,13 @@ class LootControlView(nextcord.ui.View):
     async def update_message(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
         if not session: return
-        
-        main_panel_embed = build_main_panel_embed(session)
-        remaining_items_embed = build_remaining_items_embed(session)
+        content = build_dynamic_loot_message(session)
         self.update_components()
-        
-        await interaction.message.edit(embed=main_panel_embed, view=self)
-
-        remaining_message = session.get("remaining_message")
-        if remaining_message:
-            try:
-                if remaining_items_embed:
-                    await remaining_message.edit(embed=remaining_items_embed)
-                else:
-                    await remaining_message.delete()
-                    session["remaining_message"] = None
-            except nextcord.NotFound:
-                session["remaining_message"] = None
-
         if not self._are_items_left(session):
-            final_embed = build_main_panel_embed(session)
-            await interaction.message.edit(embed=final_embed, view=None)
+            await interaction.message.edit(content=content, view=None)
             loot_sessions.pop(self.session_id, None)
+        else:
+            await interaction.message.edit(content=content, view=self)
 
     async def on_timeout(self):
         session = loot_sessions.get(self.session_id)
@@ -245,14 +250,9 @@ class LootControlView(nextcord.ui.View):
         try:
             channel = bot.get_channel(session["channel_id"])
             if channel:
-                main_message = await channel.fetch_message(self.session_id)
-                final_embed = build_main_panel_embed(session, timed_out=True)
-                await main_message.edit(embed=final_embed, view=None)
-
-                if session.get("remaining_message"):
-                    remaining_message = session.get("remaining_message")
-                    if remaining_message:
-                        await remaining_message.delete()
+                message = await channel.fetch_message(self.session_id)
+                final_content = build_dynamic_loot_message(session, timed_out=True)
+                await message.edit(content=final_content, view=None)
         except (nextcord.NotFound, nextcord.Forbidden):
             pass
         finally:
@@ -261,7 +261,29 @@ class LootControlView(nextcord.ui.View):
     async def on_item_select(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
         if not session: return
-        session["selected_items"] = interaction.data["values"]
+
+        # NEW LOGIC: Intelligently update selections across multiple dropdowns.
+        newly_selected_values = interaction.data["values"]
+        
+        # Get the index of the dropdown that was interacted with.
+        dropdown_index = int(interaction.data["custom_id"].split("_")[-1])
+        
+        # Determine the full list of possible values for THIS dropdown.
+        available_items = [(index, item) for index, item in enumerate(session["items"]) if not item["assigned_to"]]
+        item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
+        possible_values_in_this_dropdown = {str(index) for index, item in item_chunks[dropdown_index]}
+
+        # Get the current master list of selected items.
+        current_master_selection = set(session.get("selected_items") or [])
+
+        # Remove all items that *could* have been in this dropdown from the master list.
+        current_master_selection -= possible_values_in_this_dropdown
+
+        # Add the newly selected items to the master list.
+        current_master_selection.update(newly_selected_values)
+
+        session["selected_items"] = list(current_master_selection)
+        
         self.update_components()
         await interaction.response.edit_message(view=self)
 
@@ -282,7 +304,6 @@ class LootControlView(nextcord.ui.View):
         session["selected_items"] = None
         self._advance_turn_snake(session)
         await self.update_message(interaction)
-
 
 # ===================================================================================================
 # MODAL POP-UP
