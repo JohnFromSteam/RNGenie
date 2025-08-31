@@ -155,8 +155,19 @@ class LootControlView(nextcord.ui.View):
 
         if is_setup_phase:
             # --- PHASE 1: PARTICIPANT MANAGEMENT ---
-            member_options = [nextcord.SelectOption(label=f"{r['member'].display_name} (Roll: {r['roll']})", value=str(r['member'].id)) for r in session["rolls"]]
-            if member_options:
+            if session["rolls"]:
+                member_options = []
+                selected_to_remove = session.get("members_to_remove") or []
+                for r in session["rolls"]:
+                    member_id_str = str(r['member'].id)
+                    is_selected = member_id_str in selected_to_remove
+                    member_options.append(
+                        nextcord.SelectOption(
+                            label=f"{r['member'].display_name} (Roll: {r['roll']})",
+                            value=member_id_str,
+                            default=is_selected
+                        )
+                    )
                 self.add_item(nextcord.ui.Select(placeholder="Select participants to remove...", options=member_options, custom_id="remove_select", min_values=0, max_values=len(member_options)))
             
             remove_button_disabled = not session.get("members_to_remove")
