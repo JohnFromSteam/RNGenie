@@ -26,6 +26,13 @@ NUMBER_EMOJIS = {
     16: "1️⃣6️⃣", 17: "1️⃣7️⃣", 18: "1️⃣8️⃣", 19: "1️⃣9️⃣", 20: "2️⃣0️⃣"
 }
 
+# ANSI color codes
+ANSI_RESET = "\u001b[0m"
+ANSI_HEADER = "\u001b[0;33m"
+ANSI_USER = "\u001b[0;34m"
+ANSI_NOT_TAKEN = "\u001b[0;31m"
+ANSI_ASSIGNED = "\u001b[0;32m"
+
 
 # ===================================================================================================
 # EMBED MESSAGE BUILDERS
@@ -149,10 +156,6 @@ def build_remaining_items_embed(session):
 # DYNAMIC UI VIEW (BUTTONS & DROPDOWNS)
 # ===================================================================================================
 
-# ===================================================================================================
-# DYNAMIC UI VIEW (BUTTONS & DROPDOWNS)
-# ===================================================================================================
-
 class LootControlView(nextcord.ui.View):
     def __init__(self, session_id):
         super().__init__(timeout=1800) 
@@ -184,12 +187,9 @@ class LootControlView(nextcord.ui.View):
         session = loot_sessions.get(self.session_id)
         self.clear_items()
         if not session or not self._are_items_left(session): return
-
         is_picking_turn = session["current_turn"] >= 0 and session["current_turn"] < len(session["rolls"])
         if is_picking_turn:
             available_items = [(index, item) for index, item in enumerate(session["items"]) if not item["assigned_to"]]
-            
-            # NEW LOGIC: Handle more than 25 items by creating multiple dropdowns.
             if available_items:
                 item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
                 for i, chunk in enumerate(item_chunks):
@@ -206,7 +206,7 @@ class LootControlView(nextcord.ui.View):
                         placeholder = f"Choose items ({start_num}-{end_num})..."
 
                     self.add_item(nextcord.ui.Select(placeholder=placeholder, options=options, custom_id=f"item_select_{i}", min_values=0, max_values=len(options)))
-
+            
             assign_button_disabled = not session.get("selected_items")
             self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.green, emoji="✅", custom_id="assign_button", disabled=assign_button_disabled))
         
@@ -215,7 +215,6 @@ class LootControlView(nextcord.ui.View):
         else:
             self.add_item(nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button"))
         
-        # Re-register callbacks for all components.
         for child in self.children:
             if hasattr(child, 'custom_id'):
                 if child.custom_id == "assign_button": child.callback = self.on_assign
@@ -236,13 +235,28 @@ class LootControlView(nextcord.ui.View):
     async def update_message(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
         if not session: return
-        content = build_dynamic_loot_message(session)
+        
+        main_panel_embed = build_main_panel_embed(session)
+        remaining_items_embed = build_remaining_items_embed(session)
         self.update_components()
+        
+        await interaction.message.edit(embed=main_panel_embed, view=self)
+
+        remaining_message = session.get("remaining_message")
+        if remaining_message:
+            try:
+                if remaining_items_embed:
+                    await remaining_message.edit(embed=remaining_items_embed)
+                else:
+                    await remaining_message.delete()
+                    session["remaining_message"] = None
+            except nextcord.NotFound:
+                session["remaining_message"] = None
+
         if not self._are_items_left(session):
-            await interaction.message.edit(content=content, view=None)
+            final_embed = build_main_panel_embed(session)
+            await interaction.message.edit(embed=final_embed, view=None)
             loot_sessions.pop(self.session_id, None)
-        else:
-            await interaction.message.edit(content=content, view=self)
 
     async def on_timeout(self):
         session = loot_sessions.get(self.session_id)
@@ -250,9 +264,12 @@ class LootControlView(nextcord.ui.View):
         try:
             channel = bot.get_channel(session["channel_id"])
             if channel:
-                message = await channel.fetch_message(self.session_id)
-                final_content = build_dynamic_loot_message(session, timed_out=True)
-                await message.edit(content=final_content, view=None)
+                main_message = await channel.fetch_message(self.session_id)
+                final_embed = build_main_panel_embed(session, timed_out=True)
+                await main_message.edit(embed=final_embed, view=None)
+
+                if session.get("remaining_message"):
+                    await session["remaining_message"].delete()
         except (nextcord.NotFound, nextcord.Forbidden):
             pass
         finally:
@@ -262,24 +279,15 @@ class LootControlView(nextcord.ui.View):
         session = loot_sessions.get(self.session_id)
         if not session: return
 
-        # NEW LOGIC: Intelligently update selections across multiple dropdowns.
         newly_selected_values = interaction.data["values"]
-        
-        # Get the index of the dropdown that was interacted with.
         dropdown_index = int(interaction.data["custom_id"].split("_")[-1])
         
-        # Determine the full list of possible values for THIS dropdown.
         available_items = [(index, item) for index, item in enumerate(session["items"]) if not item["assigned_to"]]
         item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
         possible_values_in_this_dropdown = {str(index) for index, item in item_chunks[dropdown_index]}
 
-        # Get the current master list of selected items.
         current_master_selection = set(session.get("selected_items") or [])
-
-        # Remove all items that *could* have been in this dropdown from the master list.
         current_master_selection -= possible_values_in_this_dropdown
-
-        # Add the newly selected items to the master list.
         current_master_selection.update(newly_selected_values)
 
         session["selected_items"] = list(current_master_selection)
@@ -304,6 +312,7 @@ class LootControlView(nextcord.ui.View):
         session["selected_items"] = None
         self._advance_turn_snake(session)
         await self.update_message(interaction)
+
 
 # ===================================================================================================
 # MODAL POP-UP
@@ -354,11 +363,9 @@ class LootModal(nextcord.ui.Modal):
             "just_reversed": False, "remaining_message": None
         }
         
-        # Send placeholders first to avoid "Interaction Failed"
         main_message = await interaction.followup.send("`Initializing Main Panel...`", wait=True)
         remaining_message = await interaction.channel.send("`Loading Item List...`")
         
-        # Now build the full embeds
         panel_embed = build_main_panel_embed(session)
         remaining_embed = build_remaining_items_embed(session)
 
@@ -369,7 +376,6 @@ class LootModal(nextcord.ui.Modal):
         
         final_view = LootControlView(session_id)
 
-        # Edit the placeholders with the full content
         await main_message.edit(content=None, embed=panel_embed, view=final_view)
         if remaining_embed and remaining_message:
             await remaining_message.edit(content=None, embed=remaining_embed)
