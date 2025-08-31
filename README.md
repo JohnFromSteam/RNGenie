@@ -69,8 +69,8 @@ You can run RNGenie locally for testing or deploy it to a 24/7 hosting provider.
         -   `View Channels`
         -   `Send Messages`
         -   `Read Message History`
-        -   `Connect`
         -   `Use Slash Commands`
+        -   `Connect`
     -   Copy the generated URL and paste it into your browser to invite the bot to your server.
 
 7.  **Run the Bot:**
