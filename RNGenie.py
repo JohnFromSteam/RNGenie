@@ -78,7 +78,7 @@ def build_main_panel_embed(session, timed_out=False):
                     assigned_items_body += f"└ {item_name}\n"
     embed.add_field(name=assigned_header_text, value=assigned_items_body, inline=False)
 
-    # --- Part 4: Unclaimed Items (on timeout/finish) ---
+    # --- Part 4: Unclaimed Items (only on timeout/finish) ---
     if timed_out or not any(not item["assigned_to"] for item in session["items"]):
         remaining_items = [item for item in session["items"] if not item["assigned_to"]]
         if remaining_items:
@@ -250,7 +250,9 @@ class LootControlView(nextcord.ui.View):
                 await main_message.edit(embed=final_embed, view=None)
 
                 if session.get("remaining_message"):
-                    await session["remaining_message"].delete()
+                    remaining_message = session.get("remaining_message")
+                    if remaining_message:
+                        await remaining_message.delete()
         except (nextcord.NotFound, nextcord.Forbidden):
             pass
         finally:
@@ -331,19 +333,27 @@ class LootModal(nextcord.ui.Modal):
             "just_reversed": False, "remaining_message": None
         }
         
+        # Send placeholders first to avoid "Interaction Failed"
+        main_message = await interaction.followup.send("`Initializing Main Panel...`", wait=True)
+        remaining_message = await interaction.channel.send("`Loading Item List...`")
+        
+        # Now build the full embeds
         panel_embed = build_main_panel_embed(session)
-        main_message = await interaction.followup.send(embed=panel_embed, view=LootControlView(0), wait=True)
-        
         remaining_embed = build_remaining_items_embed(session)
-        remaining_message = await interaction.channel.send(embed=remaining_embed) if remaining_embed else None
-        
+
         session_id = main_message.id
         session["channel_id"] = main_message.channel.id
         session["remaining_message"] = remaining_message
         loot_sessions[session_id] = session
         
         final_view = LootControlView(session_id)
-        await main_message.edit(view=final_view)
+
+        # Edit the placeholders with the full content
+        await main_message.edit(content=None, embed=panel_embed, view=final_view)
+        if remaining_embed and remaining_message:
+            await remaining_message.edit(content=None, embed=remaining_embed)
+        elif remaining_message:
+            await remaining_message.delete()
 
 
 # ===================================================================================================
