@@ -28,11 +28,11 @@ NUMBER_EMOJIS = {
 
 
 # ===================================================================================================
-# EMBED MESSAGE BUILDER
+# EMBED MESSAGE BUILDERS
 # ===================================================================================================
 
-def build_dynamic_loot_embed(session, timed_out=False):
-    """Builds the entire dynamic loot session into a single, robust embed."""
+def build_main_panel_embed(session, timed_out=False):
+    """Builds the primary message with roll order, assigned items, and controls."""
     invoker = session["invoker"]
     rolls = session["rolls"]
 
@@ -78,30 +78,30 @@ def build_dynamic_loot_embed(session, timed_out=False):
                     assigned_items_body += f"└ {item_name}\n"
     embed.add_field(name=assigned_header_text, value=assigned_items_body, inline=False)
 
-    # --- Part 4: Remaining Items Fields (Intelligently Split) ---
-    remaining_items = [item for item in session["items"] if not item["assigned_to"]]
-    if remaining_items:
-        header_text = "❌ Remaining Loot Items ❌" if not timed_out else "❌ Unclaimed Items ❌"
-        
-        # Split remaining items across multiple fields if they exceed the 1024 character limit.
-        item_fields = []
-        current_field = ""
-        for item in remaining_items:
-            line = f"{item['name']}\n"
-            if len(current_field) + len(line) > 1024:
-                item_fields.append(current_field)
-                current_field = ""
-            current_field += line
-        item_fields.append(current_field)
+    # --- Part 4: Unclaimed Items (on timeout/finish) ---
+    if timed_out or not any(not item["assigned_to"] for item in session["items"]):
+        remaining_items = [item for item in session["items"] if not item["assigned_to"]]
+        if remaining_items:
+            header_text = "❌ Unclaimed Items ❌"
+            
+            item_fields = []
+            current_field = ""
+            for item in remaining_items:
+                line = f"{item['name']}\n"
+                if len(current_field) + len(line) > 1024:
+                    item_fields.append(current_field)
+                    current_field = ""
+                current_field += line
+            item_fields.append(current_field)
 
-        for i, field_content in enumerate(item_fields):
-            field_name = header_text
-            if len(item_fields) > 1:
-                field_name += f" ({i+1}/{len(item_fields)})"
-            embed.add_field(name=field_name, value=field_content, inline=False)
+            for i, field_content in enumerate(item_fields):
+                field_name = header_text
+                if len(item_fields) > 1:
+                    field_name += f" ({i+1}/{len(item_fields)})"
+                embed.add_field(name=field_name, value=field_content, inline=False)
 
     # --- Part 5: Footer ---
-    if not timed_out and remaining_items:
+    if not timed_out and any(not item["assigned_to"] for item in session["items"]):
         if session["current_turn"] >= 0:
             picker = session["rolls"][session["current_turn"]]["member"]
             direction_text = "Normal Order" if session["direction"] == 1 else "Reverse Order"
@@ -115,6 +115,33 @@ def build_dynamic_loot_embed(session, timed_out=False):
         else:
             embed.set_footer(text=f"Loot is ready! {invoker.display_name} must click 'Start Loot Assignment!' to begin.")
             
+    return embed
+
+def build_remaining_items_embed(session):
+    """Builds the separate embed for the list of remaining items."""
+    remaining_items = [item for item in session["items"] if not item["assigned_to"]]
+    if not remaining_items:
+        return None
+
+    embed = nextcord.Embed(color=nextcord.Color.dark_grey())
+    header_text = "❌ Remaining Loot Items ❌"
+    
+    item_fields = []
+    current_field = ""
+    for item in remaining_items:
+        line = f"{item['name']}\n"
+        if len(current_field) + len(line) > 1024:
+            item_fields.append(current_field)
+            current_field = ""
+        current_field += line
+    item_fields.append(current_field)
+
+    for i, field_content in enumerate(item_fields):
+        field_name = header_text
+        if len(item_fields) > 1:
+            field_name += f" ({i+1}/{len(item_fields)})"
+        embed.add_field(name=field_name, value=field_content, inline=False)
+
     return embed
 
 
@@ -190,14 +217,27 @@ class LootControlView(nextcord.ui.View):
         session = loot_sessions.get(self.session_id)
         if not session: return
         
-        embed = build_dynamic_loot_embed(session)
+        main_panel_embed = build_main_panel_embed(session)
+        remaining_items_embed = build_remaining_items_embed(session)
         self.update_components()
         
+        await interaction.message.edit(embed=main_panel_embed, view=self)
+
+        remaining_message = session.get("remaining_message")
+        if remaining_message:
+            try:
+                if remaining_items_embed:
+                    await remaining_message.edit(embed=remaining_items_embed)
+                else:
+                    await remaining_message.delete()
+                    session["remaining_message"] = None
+            except nextcord.NotFound:
+                session["remaining_message"] = None
+
         if not self._are_items_left(session):
-            await interaction.message.edit(embed=embed, view=None)
+            final_embed = build_main_panel_embed(session)
+            await interaction.message.edit(embed=final_embed, view=None)
             loot_sessions.pop(self.session_id, None)
-        else:
-            await interaction.message.edit(embed=embed, view=self)
 
     async def on_timeout(self):
         session = loot_sessions.get(self.session_id)
@@ -205,9 +245,12 @@ class LootControlView(nextcord.ui.View):
         try:
             channel = bot.get_channel(session["channel_id"])
             if channel:
-                message = await channel.fetch_message(self.session_id)
-                final_embed = build_dynamic_loot_embed(session, timed_out=True)
-                await message.edit(embed=final_embed, view=None)
+                main_message = await channel.fetch_message(self.session_id)
+                final_embed = build_main_panel_embed(session, timed_out=True)
+                await main_message.edit(embed=final_embed, view=None)
+
+                if session.get("remaining_message"):
+                    await session["remaining_message"].delete()
         except (nextcord.NotFound, nextcord.Forbidden):
             pass
         finally:
@@ -285,19 +328,22 @@ class LootModal(nextcord.ui.Modal):
             "rolls": rolls, "items": items_data, "current_turn": -1, 
             "invoker_id": interaction.user.id, "invoker": interaction.user,
             "selected_items": None, "round": 0, "direction": 1,
-            "just_reversed": False
+            "just_reversed": False, "remaining_message": None
         }
         
-        loot_message = await interaction.followup.send("`Initializing Loot Session...`", wait=True)
+        panel_embed = build_main_panel_embed(session)
+        main_message = await interaction.followup.send(embed=panel_embed, view=LootControlView(0), wait=True)
         
-        initial_embed = build_dynamic_loot_embed(session)
+        remaining_embed = build_remaining_items_embed(session)
+        remaining_message = await interaction.channel.send(embed=remaining_embed) if remaining_embed else None
         
-        session_id = loot_message.id
-        session["channel_id"] = loot_message.channel.id
+        session_id = main_message.id
+        session["channel_id"] = main_message.channel.id
+        session["remaining_message"] = remaining_message
         loot_sessions[session_id] = session
         
         final_view = LootControlView(session_id)
-        await loot_message.edit(content=None, embed=initial_embed, view=final_view)
+        await main_message.edit(view=final_view)
 
 
 # ===================================================================================================
@@ -333,7 +379,6 @@ async def on_application_command_error(interaction: nextcord.Interaction, error:
     print("--- End of exception report ---\n")
     if not interaction.is_expired():
         try:
-            # Use followup as the original interaction might have been deferred or responded to.
             if interaction.response.is_done():
                 await interaction.followup.send("❌ An unexpected error occurred. The developer has been notified via console logs.", ephemeral=True)
             else:
