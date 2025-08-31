@@ -92,8 +92,9 @@ def build_dynamic_loot_message(session, timed_out=False):
         header_text = "❌ Remaining Loot Items ❌" if not timed_out else "❌ Unclaimed Items ❌"
         remaining_header = f"```ansi\n{ANSI_HEADER}{header_text}{ANSI_RESET}\n==================================\n"
         remaining_body = ""
-        for item in remaining_items:
-            remaining_body += f"{item['name']}\n"
+        # Prepend a sequential number to each item for easy reference.
+        for i, item in enumerate(remaining_items, 1):
+            remaining_body += f"{i}. {item['name']}\n"
         remaining_footer = "==================================\n```"
         remaining_section = remaining_header + remaining_body + remaining_footer
         
@@ -153,18 +154,26 @@ class LootControlView(nextcord.ui.View):
         if is_picking_turn:
             available_items = [(index, item) for index, item in enumerate(session["items"]) if not item["assigned_to"]]
             if available_items:
-                item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
+                # Create a list of available items with their new sequential numbers (1, 2, 3...)
+                numbered_available_items = list(enumerate(available_items, 1))
+
+                item_chunks = [numbered_available_items[i:i + 25] for i in range(0, len(numbered_available_items), 25)]
                 for i, chunk in enumerate(item_chunks):
                     options = []
                     selected_values = session.get("selected_items") or []
-                    for index, item in chunk:
-                        is_selected = str(index) in selected_values
-                        options.append(nextcord.SelectOption(label=(item["name"][:97] + '...') if len(item["name"]) > 100 else item["name"], value=str(index), default=is_selected))
+                    # Each item in the chunk has its sequential number and its original data
+                    for sequential_num, (original_index, item_dict) in chunk:
+                        is_selected = str(original_index) in selected_values
+                        # Prepend the sequential number to the dropdown label
+                        label_text = f"{sequential_num}. {item_dict['name']}"
+                        truncated_label = (label_text[:97] + '...') if len(label_text) > 100 else label_text
+                        options.append(nextcord.SelectOption(label=truncated_label, value=str(original_index), default=is_selected))
                     
                     placeholder = "Choose one or more items to claim..."
                     if len(item_chunks) > 1:
-                        start_num = i * 25 + 1
-                        end_num = i * 25 + len(chunk)
+                        # Use the sequential numbers for clear labeling
+                        start_num = chunk[0][0]
+                        end_num = chunk[-1][0]
                         placeholder = f"Choose items ({start_num}-{end_num})..."
 
                     self.add_item(nextcord.ui.Select(placeholder=placeholder, options=options, custom_id=f"item_select_{i}", min_values=0, max_values=len(options)))
