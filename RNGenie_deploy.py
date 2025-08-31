@@ -26,6 +26,7 @@ NUMBER_EMOJIS = {
     16: "1️⃣6️⃣", 17: "1️⃣7️⃣", 18: "1️⃣8️⃣", 19: "1️⃣9️⃣", 20: "2️⃣0️⃣"
 }
 
+# ANSI color codes
 ANSI_RESET = "\u001b[0m"
 ANSI_HEADER = "\u001b[0;33m"
 ANSI_USER = "\u001b[0;34m"
@@ -211,13 +212,21 @@ class LootControlView(nextcord.ui.View):
     async def update_message(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
         if not session: return
-        content = build_interactive_loot_panel(session)
+        main_panel_content = build_main_panel(session)
+        remaining_items_content = build_remaining_items_panel(session)
         self.update_components()
+        await interaction.message.edit(content=main_panel_content, view=self)
+        remaining_message = session.get("remaining_message")
+        if remaining_message:
+            if remaining_items_content:
+                await remaining_message.edit(content=remaining_items_content)
+            else:
+                await remaining_message.delete()
+                session["remaining_message"] = None
         if not self._are_items_left(session):
-            await interaction.message.edit(content=content, view=None)
+            final_content = build_final_summary(session)
+            await interaction.message.edit(content=final_content, view=None)
             loot_sessions.pop(self.session_id, None)
-        else:
-            await interaction.message.edit(content=content, view=self)
 
     async def on_timeout(self):
         session = loot_sessions.get(self.session_id)
@@ -225,9 +234,11 @@ class LootControlView(nextcord.ui.View):
         try:
             channel = bot.get_channel(session["channel_id"])
             if channel:
-                message = await channel.fetch_message(self.session_id)
-                timeout_content = build_timeout_message(session)
-                await message.edit(content=timeout_content, view=None)
+                main_message = await channel.fetch_message(self.session_id)
+                final_content = build_final_summary(session, timed_out=True)
+                await main_message.edit(content=final_content, view=None)
+                if session.get("remaining_message"):
+                    await session["remaining_message"].delete()
         except (nextcord.NotFound, nextcord.Forbidden):
             pass
         finally:
@@ -303,25 +314,26 @@ class LootModal(nextcord.ui.Modal):
             "rolls": rolls, "items": items_data, "current_turn": -1, 
             "invoker_id": interaction.user.id, "invoker": interaction.user,
             "selected_items": None, "round": 0, "direction": 1,
-            "just_reversed": False
+            "just_reversed": False, "remaining_message": None
         }
         
-        roll_order_content = build_roll_order_message(interaction.user, rolls)
-        await interaction.channel.send(roll_order_content)
-
-        panel_content = build_interactive_loot_panel(session)
-        loot_message = await interaction.followup.send(
+        panel_content = build_main_panel(session)
+        main_message = await interaction.followup.send(
             content=panel_content,
             view=LootControlView(0),
             wait=True
         )
         
-        session_id = loot_message.id
-        session["channel_id"] = loot_message.channel.id
+        remaining_content = build_remaining_items_panel(session)
+        remaining_message = await interaction.channel.send(remaining_content)
+        
+        session_id = main_message.id
+        session["channel_id"] = main_message.channel.id
+        session["remaining_message"] = remaining_message
         loot_sessions[session_id] = session
         
         final_view = LootControlView(session_id)
-        await loot_message.edit(view=final_view)
+        await main_message.edit(view=final_view)
 
 
 # ===================================================================================================
@@ -368,7 +380,5 @@ async def on_application_command_error(interaction: nextcord.Interaction, error:
 # ===================================================================================================
 
 load_dotenv()
-# NOTE: The keep_alive() function is only needed for certain types of hosting (PaaS) and not a VPS.
-# It has been removed from this file.
-# keep_alive() 
+# NOTE: The keep_alive() function has been removed as it's not needed for a VPS with systemd.
 bot.run(os.getenv("DISCORD_TOKEN"))
