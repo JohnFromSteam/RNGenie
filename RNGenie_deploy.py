@@ -81,7 +81,7 @@ def build_main_panel(session, timed_out=False):
     for i, roll_info in enumerate(rolls):
         member = roll_info["member"]
         num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        distribution_body += f"==================================\n[{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}]\n\n"
+        distribution_body += f"==================================\n{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n\n"
         if member.id in assigned_items:
             for item_name in assigned_items[member.id]:
                 distribution_body += f"{item_name}\n"
