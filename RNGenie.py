@@ -38,23 +38,34 @@ ANSI_ASSIGNED = "\u001b[0;32m"
 # MESSAGE BUILDERS
 # ===================================================================================================
 
-def build_main_panel(session):
+def build_main_panel(session, timed_out=False):
     """Builds the primary message with roll order, assigned items, and controls."""
     invoker = session["invoker"]
     rolls = session["rolls"]
 
     # --- Part 1: Header ---
-    header = f"**(2/2)** 🎉 **Loot roll started by {invoker.mention}!**\n\n"
+    if timed_out:
+        header = "⌛ **The loot session has timed out due to 30 minutes of inactivity!**\n\n"
+    elif not any(not item["assigned_to"] for item in session["items"]):
+        header = "✅ **All items have been assigned! Looting has concluded!**\n\n"
+    else:
+        header = f"**(2/2)** 🎉 **Loot roll started by {invoker.mention}!**\n\n"
+
+    # --- Part 2: Roll Order ---
     roll_order_header = f"```ansi\n{ANSI_HEADER}# Roll Order #{ANSI_RESET}\n==================================\n"
     roll_order_body = ""
     for i, r in enumerate(rolls):
         num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
         roll_order_body += f"{num_emoji} {ANSI_USER}{r['member'].display_name}{ANSI_RESET} ({r['roll']})\n"
     roll_order_footer = "==================================\n```"
-    roll_order_section = header + roll_order_header + roll_order_body + roll_order_footer
+    roll_order_section = roll_order_header + roll_order_body + roll_order_footer
 
-    # --- Part 2: Live Loot Distribution ---
-    distribution_header = f"```ansi\n{ANSI_HEADER}✅ Assigned Items ✅{ANSI_RESET}\n"
+    # --- Part 3: Assigned Items ---
+    assigned_header_text = "✅ Assigned Items ✅"
+    if timed_out:
+        assigned_header_text = "✅ Final Assigned Items ✅"
+        
+    distribution_header = f"```ansi\n{ANSI_HEADER}{assigned_header_text}{ANSI_RESET}\n"
     distribution_body = ""
     assigned_items = {}
     for item in session["items"]:
@@ -66,28 +77,30 @@ def build_main_panel(session):
     for i, roll_info in enumerate(rolls):
         member = roll_info["member"]
         num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        distribution_body += f"==================================\n{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n\n"
+        distribution_body += f"==================================\n[{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}]\n\n"
         if member.id in assigned_items:
             for item_name in assigned_items[member.id]:
                 distribution_body += f"{item_name}\n"
     distribution_footer = "==================================\n```"
     distribution_section = distribution_header + distribution_body + distribution_footer
 
-    # --- Part 3: Footer ---
+    # --- Part 4: Footer ---
     footer = ""
-    if session["current_turn"] >= 0:
-        picker = session["rolls"][session["current_turn"]]["member"]
-        direction_text = "Normal Order" if session["direction"] == 1 else "Reverse Order"
-        picker_emoji = NUMBER_EMOJIS.get(session['current_turn'] + 1, "👉")
-        turn_text = "turn again!" if session.get("just_reversed", False) else "turn!"
-        footer = (
-            f"🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
-            f"**{picker_emoji} {picker.mention}'s {turn_text} **\n\n"
-            f"✍️ **{invoker.mention} must select\nor skip for {picker.mention}**"
-        )
-    else:
-        footer = f"🎁 **Loot distribution is ready!**\n\n✍️**{invoker.mention} can remove participants or click 'Start Loot Assignment!' to begin.**"
-    return f"{roll_order_section}\n{distribution_section}\n{footer}"
+    if not timed_out and any(not item["assigned_to"] for item in session["items"]):
+        if session["current_turn"] >= 0:
+            picker = session["rolls"][session["current_turn"]]["member"]
+            direction_text = "Normal Order" if session["direction"] == 1 else "Reverse Order"
+            picker_emoji = NUMBER_EMOJIS.get(session['current_turn'] + 1, "👉")
+            turn_text = "turn again!" if session.get("just_reversed", False) else "turn!"
+            footer = (
+                f"🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
+                f"**{picker_emoji} {picker.mention}'s {turn_text} **\n\n"
+                f"✍️ **{invoker.mention} must select\nor skip for {picker.mention}**"
+            )
+        else:
+            footer = f"🎁 **Loot distribution is ready!**\n\n✍️**{invoker.mention} can remove participants or click 'Start Loot Assignment!' to begin.**"
+    
+    return f"{header}{roll_order_section}\n{distribution_section}\n{footer}"
 
 def build_remaining_items_panel(session):
     """Builds the separate message for the list of remaining items."""
@@ -95,7 +108,7 @@ def build_remaining_items_panel(session):
     if not remaining_items:
         return None
 
-    header = f"**(1/2)**\n"
+    header = f"**(1/2)**\n\n"
     remaining_header = f"```ansi\n{ANSI_HEADER}❌ Remaining Loot Items ❌{ANSI_RESET}\n==================================\n"
     remaining_body = ""
     for i, item in enumerate(remaining_items, 1):
@@ -124,7 +137,7 @@ def build_final_summary(session, timed_out=False):
     for i, roll_info in enumerate(rolls):
         member = roll_info["member"]
         num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        distribution_body += f"==================================\n{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n\n"
+        distribution_body += f"==================================\n[{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}]\n\n"
         if member.id in assigned_items:
             for item_name in assigned_items[member.id]:
                 distribution_body += f"{item_name}\n"
@@ -348,12 +361,13 @@ class LootControlView(nextcord.ui.View):
 class LootModal(nextcord.ui.Modal):
     """A pop-up window that prompts the user to enter the list of loot items."""
     def __init__(self):
-        super().__init__("RNGenie Loot Setup!")
+        super().__init__("RNGenie Loot Setup")
         self.loot_items = nextcord.ui.TextInput(
             label="List Your Loot Items Below (One Per Line)", 
-            placeholder="Old Republic Jedi Master Cloak\nThunderfury, Blessed Blade of the Windseeker...", 
+            placeholder="Each new line with text is an item (even this line)\nOld Republic Jedi Master Cloak\nThunderfury, Blessed Blade of the Windseeker...", 
             required=True, 
-            style=nextcord.TextInputStyle.paragraph
+            style=nextcord.TextInputStyle.paragraph,
+            max_length=1200
         )
         self.add_item(self.loot_items)
 
@@ -390,6 +404,7 @@ class LootModal(nextcord.ui.Modal):
             "just_reversed": False, "remaining_message": None
         }
         
+        # Use the robust placeholder-and-edit method to avoid character limits.
         remaining_message = await interaction.channel.send("`Loading Item List...`")
         main_message = await interaction.followup.send("`Initializing Main Panel...`", wait=True)
         
