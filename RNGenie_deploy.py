@@ -6,26 +6,7 @@ from dotenv import load_dotenv
 import nextcord
 from nextcord.ext import commands
 import random
-from threading import Thread
-from flask import Flask
-
-# ===================================================================================================
-# KEEP-ALIVE WEB SERVER (FOR HOSTING PLATFORMS)
-# ===================================================================================================
-
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "RNGenie is alive!"
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-def keep_alive():
-    t = Thread(target=run_web_server)
-    t.start()
+import traceback
 
 # ===================================================================================================
 # BOT SETUP
@@ -40,7 +21,9 @@ loot_sessions = {}
 
 NUMBER_EMOJIS = {
     1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣",
-    6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟"
+    6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟",
+    11: "1️⃣1️⃣", 12: "1️⃣2️⃣", 13: "1️⃣3️⃣", 14: "1️⃣4️⃣", 15: "1️⃣5️⃣",
+    16: "1️⃣6️⃣", 17: "1️⃣7️⃣", 18: "1️⃣8️⃣", 19: "1️⃣9️⃣", 20: "2️⃣0️⃣"
 }
 
 ANSI_RESET = "\u001b[0m"
@@ -59,18 +42,16 @@ def build_dynamic_loot_message(session):
     invoker = session["invoker"]
     rolls = session["rolls"]
 
-    # --- Part 1: Roll Order Header ---
     header = f"🎉 **Loot roll started by {invoker.mention}!**\n\n"
     roll_order_header = f"```ansi\n{ANSI_HEADER}# Roll Order #{ANSI_RESET}\n==================================\n"
     roll_order_body = ""
     for i, r in enumerate(rolls):
-        num_emoji = NUMBER_EMOJIS.get(i + 1, f"{i+1}.")
+        num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
         roll_order_body += f"{num_emoji} {ANSI_USER}{r['member'].display_name}{ANSI_RESET} ({r['roll']})\n"
     roll_order_footer = "==================================\n```"
     roll_order_section = header + roll_order_header + roll_order_body + roll_order_footer
 
-    # --- Part 2: Live Loot Distribution ---
-    distribution_header = f"```ansi\n{ANSI_HEADER}# Assigned Items #{ANSI_RESET}\n"
+    distribution_header = f"```ansi\n{ANSI_HEADER}✅ Assigned Items ✅{ANSI_RESET}\n"
     distribution_body = ""
     assigned_items = {}
     for item in session["items"]:
@@ -85,19 +66,18 @@ def build_dynamic_loot_message(session):
         distribution_body += f"==================================\n[{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}]\n\n"
         if member.id in assigned_items:
             for item_name in assigned_items[member.id]:
-                distribution_body += f"{ANSI_ASSIGNED}✅ Assigned —{ANSI_RESET} {item_name}\n"
+                distribution_body += f"{item_name}\n"
     distribution_footer = "==================================\n```"
     distribution_section = distribution_header + distribution_body + distribution_footer
 
-    # --- Part 3: Remaining Loot & Footer ---
     remaining_items = [item for item in session["items"] if not item["assigned_to"]]
     remaining_section, footer = "", ""
 
     if remaining_items:
-        remaining_header = f"```ansi\n{ANSI_HEADER}# Remaining Loot Items #{ANSI_RESET}\n==================================\n"
+        remaining_header = f"```ansi\n{ANSI_HEADER}❌ Remaining Loot Items ❌{ANSI_RESET}\n==================================\n"
         remaining_body = ""
         for item in remaining_items:
-            remaining_body += f"{ANSI_NOT_TAKEN}❌ Not Taken —{ANSI_RESET} {item['name']}\n"
+            remaining_body += f"{item['name']}\n"
         remaining_footer = "==================================\n```"
         remaining_section = remaining_header + remaining_body + remaining_footer
         
@@ -110,7 +90,7 @@ def build_dynamic_loot_message(session):
             footer = (
                 f"🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
                 f"**{picker_emoji} {picker.mention}'s {turn_text} **\n\n"
-                f"✍️ **{invoker.mention} must select\nor skip for {picker.mention}\n**"
+                f"✍️ **{invoker.mention} must select\nor skip for {picker.mention}**"
             )
         else:
             footer = f"🎁 **Loot distribution is ready!\n\n✍️{invoker.mention} must click below to begin.\n**"
@@ -123,8 +103,7 @@ def build_timeout_message(session):
     header = "⌛ **The loot session has timed out due to 30 minutes of inactivity!**\n"
     rolls = session["rolls"]
     
-    # --- Final Loot Distribution Section ---
-    distribution_header = f"```ansi\n{ANSI_HEADER}# Final Assigned Items #{ANSI_RESET}\n"
+    distribution_header = f"```ansi\n{ANSI_HEADER}✅ Final Assigned Items ✅{ANSI_RESET}\n"
     distribution_body = ""
     assigned_items = {}
     for item in session["items"]:
@@ -139,18 +118,17 @@ def build_timeout_message(session):
         distribution_body += f"==================================\n[{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}]\n\n"
         if member.id in assigned_items:
             for item_name in assigned_items[member.id]:
-                distribution_body += f"{ANSI_ASSIGNED}✅ Assigned —{ANSI_RESET} {item_name}\n"
+                distribution_body += f"{item_name}\n"
     distribution_footer = "==================================\n```"
     distribution_section = distribution_header + distribution_body + distribution_footer
 
-    # --- Unclaimed Items Section ---
     remaining_items = [item for item in session["items"] if not item["assigned_to"]]
     remaining_section = ""
     if remaining_items:
-        remaining_header = f"```ansi\n{ANSI_HEADER}# Unclaimed Items #{ANSI_RESET}\n==================================\n"
+        remaining_header = f"```ansi\n{ANSI_HEADER}❌ Unclaimed Items ❌{ANSI_RESET}\n==================================\n"
         remaining_body = ""
         for item in remaining_items:
-            remaining_body += f"{ANSI_NOT_TAKEN}❌ Not Taken —{ANSI_RESET} {item['name']}\n"
+            remaining_body += f"{item['name']}\n"
         remaining_footer = "==================================\n```"
         remaining_section = remaining_header + remaining_body + remaining_footer
 
@@ -320,6 +298,10 @@ class LootModal(nextcord.ui.Modal):
         voice_channel = guild.get_channel(interaction.user.voice.channel.id)
         members = [member for member in voice_channel.members]
         
+        if len(members) > 20:
+            await interaction.followup.send("❌ Too many users in the voice channel! The maximum is 20.", ephemeral=True)
+            return
+        
         if len(members) < 1:
             await interaction.followup.send("❌ I could not find anyone in your voice channel. This is likely a permissions issue.", ephemeral=True)
             return
@@ -377,11 +359,29 @@ async def on_ready():
     print('RNGenie is ready for local debugging.')
     print('------')
 
+@bot.event
+async def on_application_command_error(interaction: nextcord.Interaction, error: Exception):
+    """A global error handler for all slash commands and UI interactions."""
+    print(f"\n--- Unhandled exception in interaction for command '{interaction.application_command.name}' ---")
+    traceback.print_exception(type(error), error, error.__traceback__)
+    print("--- End of exception report ---\n")
+
+    if not interaction.is_expired():
+        try:
+            await interaction.followup.send(
+                "❌ An unexpected error occurred. The developer has been notified via console logs.", 
+                ephemeral=True
+            )
+        except nextcord.HTTPException:
+            pass
+
 
 # ===================================================================================================
 # RUN SCRIPT
 # ===================================================================================================
 
 load_dotenv()
-keep_alive()
+# NOTE: The keep_alive() function is no longer needed when deploying to a proper VPS with systemd.
+# It can be safely commented out or removed. It does no harm to leave it for other hosting types.
+# keep_alive() 
 bot.run(os.getenv("DISCORD_TOKEN"))
