@@ -389,8 +389,9 @@ class LootModal(nextcord.ui.Modal):
             "just_reversed": False, "remaining_message": None
         }
         
-        main_message = await interaction.followup.send("`Initializing Main Panel...`", wait=True)
-        remaining_message = await interaction.channel.send("`Loading Item List...`")
+        
+        remaining_message = await interaction.followup.send("`Loading Item List...`", wait=True)
+        main_message = await interaction.channel.send("`Initializing Main Panel...`")
         
         panel_content = build_main_panel(session)
         remaining_content = build_remaining_items_panel(session)
