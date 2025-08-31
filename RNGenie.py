@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import nextcord
 from nextcord.ext import commands
 import random
+import traceback
 
 # ===================================================================================================
 # BOT SETUP
@@ -20,7 +21,9 @@ loot_sessions = {}
 
 NUMBER_EMOJIS = {
     1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣",
-    6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟"
+    6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟",
+    11: "1️⃣1️⃣", 12: "1️⃣2️⃣", 13: "1️⃣3️⃣", 14: "1️⃣4️⃣", 15: "1️⃣5️⃣",
+    16: "1️⃣6️⃣", 17: "1️⃣7️⃣", 18: "1️⃣8️⃣", 19: "1️⃣9️⃣", 20: "2️⃣0️⃣"
 }
 
 # ANSI color codes
@@ -40,18 +43,16 @@ def build_dynamic_loot_message(session):
     invoker = session["invoker"]
     rolls = session["rolls"]
 
-    # --- Part 1: Roll Order Header ---
     header = f"🎉 **Loot roll started by {invoker.mention}!**\n\n"
     roll_order_header = f"```ansi\n{ANSI_HEADER}# Roll Order #{ANSI_RESET}\n==================================\n"
     roll_order_body = ""
     for i, r in enumerate(rolls):
-        num_emoji = NUMBER_EMOJIS.get(i + 1, f"{i+1}.")
+        num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
         roll_order_body += f"{num_emoji} {ANSI_USER}{r['member'].display_name}{ANSI_RESET} ({r['roll']})\n"
     roll_order_footer = "==================================\n```"
     roll_order_section = header + roll_order_header + roll_order_body + roll_order_footer
 
-    # --- Part 2: Live Loot Distribution ---
-    distribution_header = f"```ansi\n{ANSI_HEADER}# Assigned Items #{ANSI_RESET}\n"
+    distribution_header = f"```ansi\n{ANSI_HEADER}✅ Assigned Items ✅{ANSI_RESET}\n"
     distribution_body = ""
     assigned_items = {}
     for item in session["items"]:
@@ -66,19 +67,18 @@ def build_dynamic_loot_message(session):
         distribution_body += f"==================================\n[{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}]\n\n"
         if member.id in assigned_items:
             for item_name in assigned_items[member.id]:
-                distribution_body += f"{ANSI_ASSIGNED}✅ Assigned —{ANSI_RESET} {item_name}\n"
+                distribution_body += f"{item_name}\n"
     distribution_footer = "==================================\n```"
     distribution_section = distribution_header + distribution_body + distribution_footer
 
-    # --- Part 3: Remaining Loot & Footer ---
     remaining_items = [item for item in session["items"] if not item["assigned_to"]]
     remaining_section, footer = "", ""
 
     if remaining_items:
-        remaining_header = f"```ansi\n{ANSI_HEADER}# Remaining Loot Items #{ANSI_RESET}\n==================================\n"
+        remaining_header = f"```ansi\n{ANSI_HEADER}❌ Remaining Loot Items ❌{ANSI_RESET}\n==================================\n"
         remaining_body = ""
         for item in remaining_items:
-            remaining_body += f"{ANSI_NOT_TAKEN}❌ Not Taken —{ANSI_RESET} {item['name']}\n"
+            remaining_body += f"{item['name']}\n"
         remaining_footer = "==================================\n```"
         remaining_section = remaining_header + remaining_body + remaining_footer
         
@@ -91,7 +91,7 @@ def build_dynamic_loot_message(session):
             footer = (
                 f"🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
                 f"**{picker_emoji} {picker.mention}'s {turn_text} **\n\n"
-                f"✍️ **{invoker.mention} must select\nor skip for {picker.mention}\n**"
+                f"✍️ **{invoker.mention} must select\nor skip for {picker.mention}**"
             )
         else:
             footer = f"🎁 **Loot distribution is ready!\n\n✍️{invoker.mention} must click below to begin.\n**"
@@ -104,8 +104,7 @@ def build_timeout_message(session):
     header = "⌛ **The loot session has timed out due to 30 minutes of inactivity!**\n"
     rolls = session["rolls"]
     
-    # --- Final Loot Distribution Section ---
-    distribution_header = f"```ansi\n{ANSI_HEADER}# Final Assigned Items #{ANSI_RESET}\n"
+    distribution_header = f"```ansi\n{ANSI_HEADER}✅ Final Assigned Items ✅{ANSI_RESET}\n"
     distribution_body = ""
     assigned_items = {}
     for item in session["items"]:
@@ -120,18 +119,17 @@ def build_timeout_message(session):
         distribution_body += f"==================================\n[{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}]\n\n"
         if member.id in assigned_items:
             for item_name in assigned_items[member.id]:
-                distribution_body += f"{ANSI_ASSIGNED}✅ Assigned —{ANSI_RESET} {item_name}\n"
+                distribution_body += f"{item_name}\n"
     distribution_footer = "==================================\n```"
     distribution_section = distribution_header + distribution_body + distribution_footer
 
-    # --- Unclaimed Items Section ---
     remaining_items = [item for item in session["items"] if not item["assigned_to"]]
     remaining_section = ""
     if remaining_items:
-        remaining_header = f"```ansi\n{ANSI_HEADER}# Unclaimed Items #{ANSI_RESET}\n==================================\n"
+        remaining_header = f"```ansi\n{ANSI_HEADER}❌ Unclaimed Items ❌{ANSI_RESET}\n==================================\n"
         remaining_body = ""
         for item in remaining_items:
-            remaining_body += f"{ANSI_NOT_TAKEN}❌ Not Taken —{ANSI_RESET} {item['name']}\n"
+            remaining_body += f"{item['name']}\n"
         remaining_footer = "==================================\n```"
         remaining_section = remaining_header + remaining_body + remaining_footer
 
@@ -143,23 +141,15 @@ def build_timeout_message(session):
 # ===================================================================================================
 
 class LootControlView(nextcord.ui.View):
-    """
-    Manages the interactive components of the loot message and handles timeouts.
-    """
     def __init__(self, session_id):
         super().__init__(timeout=1800) 
         self.session_id = session_id
         self.update_components()
 
     def _are_items_left(self, session):
-        """Helper to check if any items are still unassigned."""
         return any(not item["assigned_to"] for item in session["items"])
 
     def _advance_turn_snake(self, session):
-        """
-        Advances the turn in a "snake draft" order. When the order reaches an end,
-        the person at the end gets a second consecutive turn before the order reverses.
-        """
         session["just_reversed"] = False
         
         if not self._are_items_left(session):
@@ -183,7 +173,6 @@ class LootControlView(nextcord.ui.View):
             session["just_reversed"] = True
 
     def update_components(self):
-        """Dynamically redraws the buttons and dropdown based on the current session state."""
         session = loot_sessions.get(self.session_id)
         self.clear_items()
         if not session or not self._are_items_left(session): return
@@ -215,7 +204,6 @@ class LootControlView(nextcord.ui.View):
                 if child.custom_id == "item_select": child.callback = self.on_item_select
 
     async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
-        """Ensures only the original command invoker can use the controls."""
         session = loot_sessions.get(self.session_id)
         if not session:
             await interaction.response.send_message("❌ This loot session has expired or could not be found.", ephemeral=True)
@@ -228,7 +216,6 @@ class LootControlView(nextcord.ui.View):
             return False
 
     async def update_message(self, interaction: nextcord.Interaction):
-        """A central method to update the main loot message with new content and components."""
         session = loot_sessions.get(self.session_id)
         if not session: return
         
@@ -242,7 +229,6 @@ class LootControlView(nextcord.ui.View):
             await interaction.message.edit(content=content, view=self)
 
     async def on_timeout(self):
-        """Called when the view's 30-minute timer expires due to inactivity."""
         session = loot_sessions.get(self.session_id)
         if not session:
             return
@@ -259,7 +245,6 @@ class LootControlView(nextcord.ui.View):
             loot_sessions.pop(self.session_id, None)
 
     async def on_item_select(self, interaction: nextcord.Interaction):
-        """Stores the selection and immediately updates the message to show checkmarks and enable the 'Assign' button."""
         session = loot_sessions.get(self.session_id)
         if not session: return
         session["selected_items"] = interaction.data["values"]
@@ -268,7 +253,6 @@ class LootControlView(nextcord.ui.View):
         await interaction.response.edit_message(view=self)
 
     async def on_assign(self, interaction: nextcord.Interaction):
-        """Assigns the selected item(s) to the current picker and advances the turn."""
         session = loot_sessions.get(self.session_id)
         if not session: return
         
@@ -282,7 +266,6 @@ class LootControlView(nextcord.ui.View):
         await self.update_message(interaction)
 
     async def on_skip(self, interaction: nextcord.Interaction):
-        """Skips the current turn and advances to the next picker."""
         session = loot_sessions.get(self.session_id)
         if not session: return
         session["selected_items"] = None
@@ -318,6 +301,10 @@ class LootModal(nextcord.ui.Modal):
         voice_channel = guild.get_channel(interaction.user.voice.channel.id)
         members = [member for member in voice_channel.members]
         
+        if len(members) > 20:
+            await interaction.followup.send("❌ Too many users in the voice channel! The maximum is 20.", ephemeral=True)
+            return
+
         if len(members) < 1:
             await interaction.followup.send("❌ I could not find anyone in your voice channel. This is likely a permissions issue.", ephemeral=True)
             return
@@ -376,6 +363,26 @@ async def on_ready():
     print(f'Logged in as {bot.user}')
     print('RNGenie is ready for local debugging.')
     print('------')
+
+@bot.event
+async def on_application_command_error(interaction: nextcord.Interaction, error: Exception):
+    """A global error handler for all slash commands and UI interactions."""
+    # Print the full error traceback to the console for detailed debugging.
+    print(f"\n--- Unhandled exception in interaction for command '{interaction.application_command.name}' ---")
+    traceback.print_exception(type(error), error, error.__traceback__)
+    print("--- End of exception report ---\n")
+
+    # Inform the user that something went wrong.
+    if not interaction.is_expired():
+        try:
+            # Use followup as the original interaction might have been deferred or responded to.
+            await interaction.followup.send(
+                "❌ An unexpected error occurred. The developer has been notified via console logs.", 
+                ephemeral=True
+            )
+        except nextcord.HTTPException:
+            # If followup fails, it's likely the interaction is in a state where it can't be responded to.
+            pass
 
 
 # ===================================================================================================
