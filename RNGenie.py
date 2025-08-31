@@ -35,11 +35,11 @@ ANSI_ASSIGNED = "\u001b[0;32m"
 
 
 # ===================================================================================================
-# UNIFIED MESSAGE BUILDER
+# MESSAGE BUILDERS
 # ===================================================================================================
 
-def build_dynamic_loot_message(session, timed_out=False):
-    """Builds the entire dynamic message content in a single, character-limit-safe message."""
+def build_main_panel(session, timed_out=False):
+    """Builds the primary message with roll order, assigned items, and controls."""
     invoker = session["invoker"]
     rolls = session["rolls"]
 
@@ -80,38 +80,42 @@ def build_dynamic_loot_message(session, timed_out=False):
         distribution_body += f"==================================\n{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n\n"
         if member.id in assigned_items:
             for item_name in assigned_items[member.id]:
-                distribution_body += f"{item_name}\n"
+                distribution_body += f"{item_name}\n" # Displays the clean item name
     distribution_footer = "==================================\n```"
     distribution_section = distribution_header + distribution_body + distribution_footer
 
-    # --- Part 4: Remaining Items & Footer ---
+    # --- Part 4: Footer ---
     remaining_items = [item for item in session["items"] if not item["assigned_to"]]
-    remaining_section, footer = "", ""
+    footer = ""
 
-    if remaining_items:
-        header_text = "❌ Remaining Loot Items ❌" if not timed_out else "❌ Unclaimed Items ❌"
-        remaining_header = f"```ansi\n{ANSI_HEADER}{header_text}{ANSI_RESET}\n==================================\n"
-        remaining_body = ""
-        for i, item in enumerate(remaining_items, 1):
-            remaining_body += f"{i}. {item['name']}\n"
-        remaining_footer = "==================================\n```"
-        remaining_section = remaining_header + remaining_body + remaining_footer
-        
-        if not timed_out:
-            if session["current_turn"] >= 0:
-                picker = session["rolls"][session["current_turn"]]["member"]
-                direction_text = "Normal Order" if session["direction"] == 1 else "Reverse Order"
-                picker_emoji = NUMBER_EMOJIS.get(session['current_turn'] + 1, "👉")
-                turn_text = "turn again!" if session.get("just_reversed", False) else "turn!"
-                footer = (
-                    f"🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
-                    f"**{picker_emoji} {picker.mention}'s {turn_text} **\n\n"
-                    f"✍️ **{invoker.mention} must select\nor skip for {picker.mention}**"
-                )
-            else:
-                footer = f"🎁 **Loot distribution is ready!**\n\n✍️**{invoker.mention} can remove participants or click 'Start Loot Assignment!' to begin.**"
+    if remaining_items and not timed_out:
+        if session["current_turn"] >= 0:
+            picker = session["rolls"][session["current_turn"]]["member"]
+            direction_text = "Normal Order" if session["direction"] == 1 else "Reverse Order"
+            picker_emoji = NUMBER_EMOJIS.get(session['current_turn'] + 1, "👉")
+            turn_text = "turn again!" if session.get("just_reversed", False) else "turn!"
+            footer = (
+                f"🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
+                f"**{picker_emoji} {picker.mention}'s {turn_text} **\n\n"
+                f"✍️ **{invoker.mention} must select\nor skip for {picker.mention}**"
+            )
+        else:
+            footer = f"🎁 **Loot distribution is ready!\n\n✍️{invoker.mention} must click below to begin.\n**"
 
-    return f"{header}{roll_order_section}\n{distribution_section}\n{remaining_section}\n{footer}"
+    return f"{header}{roll_order_section}\n{distribution_section}\n{footer}"
+
+def build_remaining_items_panel(session):
+    """Builds the separate message for the list of remaining items."""
+    remaining_items = [item for item in session["items"] if not item["assigned_to"]]
+    if not remaining_items:
+        return None
+
+    remaining_header = f"```ansi\n{ANSI_HEADER}❌ Remaining Loot Items ❌{ANSI_RESET}\n==================================\n"
+    remaining_body = ""
+    for i, item in enumerate(remaining_items, 1):
+        remaining_body += f"{i}. {item['name']}\n"
+    remaining_footer = "==================================\n```"
+    return remaining_header + remaining_body + remaining_footer
 
 
 # ===================================================================================================
@@ -150,24 +154,20 @@ class LootControlView(nextcord.ui.View):
         self.clear_items()
         if not session or not self._are_items_left(session): return
         
-        is_picking_phase = session["current_turn"] >= 0
         is_setup_phase = session["current_turn"] == -1
+        is_picking_phase = not is_setup_phase
 
         if is_setup_phase:
             # --- PHASE 1: PARTICIPANT MANAGEMENT ---
-            if session["rolls"]:
+            # Exclude the Loot Master from the list of removable members.
+            removable_members = [r for r in session["rolls"] if r["member"].id != session["invoker_id"]]
+            if removable_members:
                 member_options = []
                 selected_to_remove = session.get("members_to_remove") or []
-                for r in session["rolls"]:
+                for r in removable_members:
                     member_id_str = str(r['member'].id)
                     is_selected = member_id_str in selected_to_remove
-                    member_options.append(
-                        nextcord.SelectOption(
-                            label=f"{r['member'].display_name} (Roll: {r['roll']})",
-                            value=member_id_str,
-                            default=is_selected
-                        )
-                    )
+                    member_options.append(nextcord.SelectOption(label=f"{r['member'].display_name} (Roll: {r['roll']})", value=member_id_str, default=is_selected))
                 self.add_item(nextcord.ui.Select(placeholder="Select participants to remove...", options=member_options, custom_id="remove_select", min_values=0, max_values=len(member_options)))
             
             remove_button_disabled = not session.get("members_to_remove")
@@ -221,14 +221,27 @@ class LootControlView(nextcord.ui.View):
         session = loot_sessions.get(self.session_id)
         if not session: return
         
-        content = build_dynamic_loot_message(session)
+        main_panel_content = build_main_panel(session)
+        remaining_items_content = build_remaining_items_panel(session)
         self.update_components()
         
+        await interaction.message.edit(content=main_panel_content, view=self)
+
+        remaining_message = session.get("remaining_message")
+        if remaining_message:
+            try:
+                if remaining_items_content:
+                    await remaining_message.edit(content=remaining_items_content)
+                else:
+                    await remaining_message.delete()
+                    session["remaining_message"] = None
+            except nextcord.NotFound:
+                session["remaining_message"] = None
+
         if not self._are_items_left(session):
-            await interaction.message.edit(content=content, view=None)
+            final_content = build_main_panel(session)
+            await interaction.message.edit(content=final_content, view=None)
             loot_sessions.pop(self.session_id, None)
-        else:
-            await interaction.message.edit(content=content, view=self)
 
     async def on_timeout(self):
         session = loot_sessions.get(self.session_id)
@@ -236,15 +249,18 @@ class LootControlView(nextcord.ui.View):
         try:
             channel = bot.get_channel(session["channel_id"])
             if channel:
-                message = await channel.fetch_message(self.session_id)
-                final_content = build_dynamic_loot_message(session, timed_out=True)
-                await message.edit(content=final_content, view=None)
+                main_message = await channel.fetch_message(self.session_id)
+                final_content = build_main_panel(session, timed_out=True)
+                await main_message.edit(content=final_content, view=None)
+
+                if session.get("remaining_message"):
+                    await session["remaining_message"].delete()
         except (nextcord.NotFound, nextcord.Forbidden):
             pass
         finally:
             loot_sessions.pop(self.session_id, None)
 
-    # --- Phase 1 Callbacks ---
+    # --- Callbacks ---
 
     async def on_remove_select(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
@@ -256,41 +272,30 @@ class LootControlView(nextcord.ui.View):
     async def on_remove_confirm(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
         if not session: return
-        
         members_to_remove_ids = [int(mid) for mid in session.get("members_to_remove", [])]
         session["rolls"] = [r for r in session["rolls"] if r["member"].id not in members_to_remove_ids]
-        session["members_to_remove"] = None # Clear selection
-        
+        session["members_to_remove"] = None
         await self.update_message(interaction)
 
     async def on_start(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
         if not session: return
-        
-        # This officially starts the loot assignment phase
         self._advance_turn_snake(session)
         await self.update_message(interaction)
-
-    # --- Phase 2 Callbacks ---
 
     async def on_item_select(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
         if not session: return
-
         newly_selected_values = interaction.data["values"]
         dropdown_index = int(interaction.data["custom_id"].split("_")[-1])
-        
         available_items = [(index, item) for index, item in enumerate(session["items"]) if not item["assigned_to"]]
         numbered_available_items = list(enumerate(available_items, 1))
         item_chunks = [numbered_available_items[i:i + 25] for i in range(0, len(numbered_available_items), 25)]
         possible_values_in_this_dropdown = {str(original_index) for seq_num, (original_index, item_dict) in item_chunks[dropdown_index]}
-
         current_master_selection = set(session.get("selected_items") or [])
         current_master_selection -= possible_values_in_this_dropdown
         current_master_selection.update(newly_selected_values)
-
         session["selected_items"] = list(current_master_selection)
-        
         self.update_components()
         await interaction.response.edit_message(view=self)
 
@@ -318,6 +323,7 @@ class LootControlView(nextcord.ui.View):
 # ===================================================================================================
 
 class LootModal(nextcord.ui.Modal):
+    """A pop-up window that prompts the user to enter the list of loot items."""
     def __init__(self):
         super().__init__("RNGenie Loot Setup!")
         self.loot_items = nextcord.ui.TextInput(
@@ -329,6 +335,7 @@ class LootModal(nextcord.ui.Modal):
         self.add_item(self.loot_items)
 
     async def callback(self, interaction: nextcord.Interaction):
+        """Executed after modal submission. Gathers data and creates the initial loot session message."""
         await interaction.response.defer(ephemeral=True)
         if not interaction.user.voice or not interaction.user.voice.channel:
             await interaction.followup.send("❌ You must be in a voice channel to set up a loot roll.", ephemeral=True)
@@ -356,21 +363,28 @@ class LootModal(nextcord.ui.Modal):
         session = { 
             "rolls": rolls, "items": items_data, "current_turn": -1, 
             "invoker_id": interaction.user.id, "invoker": interaction.user,
-            "selected_items": None, "members_to_remove": None,
-            "round": 0, "direction": 1,
-            "just_reversed": False
+            "selected_items": None, "members_to_remove": None, "round": 0, "direction": 1,
+            "just_reversed": False, "remaining_message": None
         }
         
-        loot_message = await interaction.followup.send("`Initializing Loot Session...`", wait=True)
+        main_message = await interaction.followup.send("`Initializing Main Panel...`", wait=True)
+        remaining_message = await interaction.channel.send("`Loading Item List...`")
         
-        initial_content = build_dynamic_loot_message(session)
-        
-        session_id = loot_message.id
-        session["channel_id"] = loot_message.channel.id
+        panel_content = build_main_panel(session)
+        remaining_content = build_remaining_items_panel(session)
+
+        session_id = main_message.id
+        session["channel_id"] = main_message.channel.id
+        session["remaining_message"] = remaining_message
         loot_sessions[session_id] = session
         
         final_view = LootControlView(session_id)
-        await loot_message.edit(content=initial_content, view=final_view)
+
+        await main_message.edit(content=panel_content, view=final_view)
+        if remaining_content and remaining_message:
+            await remaining_message.edit(content=remaining_content)
+        elif remaining_message:
+            await remaining_message.delete()
 
 
 # ===================================================================================================
@@ -379,6 +393,7 @@ class LootModal(nextcord.ui.Modal):
 
 @bot.slash_command(name="loot", description="Starts a turn-based loot roll for your voice channel.")
 async def loot(interaction: nextcord.Interaction):
+    """The entry point for the loot command."""
     if not interaction.user.voice:
         await interaction.response.send_message("❌ You need to be in a voice channel to start a loot roll!", ephemeral=True)
         return
@@ -392,6 +407,7 @@ async def loot(interaction: nextcord.Interaction):
 
 @bot.event
 async def on_ready():
+    """Event that fires when the bot successfully logs in."""
     print(f'Logged in as {bot.user}')
     print('RNGenie is ready for local debugging.')
     print('------')
