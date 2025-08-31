@@ -371,7 +371,7 @@ class LootModal(nextcord.ui.Modal):
             placeholder="Item One\nAnother Item\nThird Item...", 
             required=True, 
             style=nextcord.TextInputStyle.paragraph,
-            max_length=1200 # Character limit for the input text box
+            max_length=1000
         )
         self.add_item(self.loot_items)
 
