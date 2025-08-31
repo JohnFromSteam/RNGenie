@@ -52,7 +52,7 @@ def build_dynamic_loot_message(session, timed_out=False):
         header = f"🎉 **Loot roll started by {invoker.mention}!**\n\n"
 
     # --- Part 2: Roll Order ---
-    roll_order_header = f"```ansi\n{ANSI_HEADER}# Roll Order #{ANSI_RESET}\n==================================\n"
+    roll_order_header = f"```ansi\n{ANSI_HEADER}🔢 Roll Order 🔢{ANSI_RESET}\n==================================\n"
     roll_order_body = ""
     for i, r in enumerate(rolls):
         num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
