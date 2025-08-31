@@ -226,7 +226,7 @@ class LootControlView(nextcord.ui.View):
                         truncated_label = (label_text[:97] + '...') if len(label_text) > 100 else label_text
                         options.append(nextcord.SelectOption(label=truncated_label, value=str(original_index), default=is_selected))
                     
-                    placeholder = f"Choose items ({chunk[0][0]}-{chunk[-1][0]})..." if len(item_chunks) > 1 else "Choose one or more items to claim..."
+                    placeholder = f"Items {chunk[0][0]}-{chunk[-1][0]}..." if len(item_chunks) > 1 else "Choose one or more items to claim..."
                     self.add_item(nextcord.ui.Select(placeholder=placeholder, options=options, custom_id=f"item_select_{i}", min_values=0, max_values=len(options)))
             
             assign_button_disabled = not session.get("selected_items")
