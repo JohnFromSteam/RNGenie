@@ -368,10 +368,10 @@ class LootModal(nextcord.ui.Modal):
         super().__init__("RNGenie Loot Setup")
         self.loot_items = nextcord.ui.TextInput(
             label="List Your Loot Items Below (One Per Line)", 
-            placeholder="Each new line with text is an item (even this line)\nOld Republic Jedi Master Cloak", 
+            placeholder="Item One\nAnother Item\nThird Item...", 
             required=True, 
             style=nextcord.TextInputStyle.paragraph,
-            max_length=1200
+            max_length=1200 # Character limit for the input text box
         )
         self.add_item(self.loot_items)
 
@@ -397,6 +397,11 @@ class LootModal(nextcord.ui.Modal):
         rolls.sort(key=lambda x: x['roll'], reverse=True)
         
         items_data = [{"name": line.strip(), "assigned_to": None} for line in self.loot_items.value.split('\n') if line.strip()]
+        
+        if len(items_data) > 100:
+            await interaction.followup.send(f"❌ Too many loot items ({len(items_data)})! The maximum is 100.", ephemeral=True)
+            return
+            
         if not items_data:
             await interaction.followup.send("⚠️ You must enter at least one item.", ephemeral=True)
             return
@@ -408,7 +413,6 @@ class LootModal(nextcord.ui.Modal):
             "just_reversed": False, "remaining_message": None
         }
         
-        # Use the robust placeholder-and-edit method to avoid character limits.
         remaining_message = await interaction.channel.send("`Loading Item List...`")
         main_message = await interaction.followup.send("`Initializing Main Panel...`", wait=True)
         
@@ -427,7 +431,6 @@ class LootModal(nextcord.ui.Modal):
             await remaining_message.edit(content=remaining_content)
         elif remaining_message:
             await remaining_message.delete()
-
 
 # ===================================================================================================
 # SLASH COMMAND
