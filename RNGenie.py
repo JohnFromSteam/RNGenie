@@ -205,8 +205,12 @@ class LootControlView(nextcord.ui.View):
                 for r in removable_members:
                     member_id_str = str(r['member'].id)
                     is_selected = member_id_str in selected_to_remove
-                    member_options.append(nextcord.SelectOption(label=f"{r['member'].display_name} (Roll: {r['roll']})", value=member_id_str, default=is_selected))
-                self.add_item(nextcord.ui.Select(placeholder="Select participants to remove...", options=member_options, custom_id="remove_select", min_values=0, max_values=len(member_options)))
+                    label_text = f"{r['member'].display_name} (Roll: {r['roll']})"
+                    truncated_label = (label_text[:97] + '...') if len(label_text) > 100 else label_text
+                    member_options.append(nextcord.SelectOption(label=truncated_label, value=member_id_str, default=is_selected))
+
+                placeholder = f"Select participants to remove ({len(removable_members)} total)..."
+                self.add_item(nextcord.ui.Select(placeholder=placeholder, options=member_options, custom_id="remove_select", min_values=0, max_values=len(member_options)))
             
             remove_button_disabled = not session.get("members_to_remove")
             self.add_item(nextcord.ui.Button(label="Remove Selected", style=nextcord.ButtonStyle.danger, emoji="✖️", custom_id="remove_button", disabled=remove_button_disabled))
