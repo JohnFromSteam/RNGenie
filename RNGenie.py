@@ -41,7 +41,7 @@ ANSI_ASSIGNED = "\u001b[0;32m"
 def build_roll_order_message(invoker, rolls):
     """Builds the static, one-time roll order message."""
     header = f"🎉 **Loot roll started by {invoker.mention}!**\n\n"
-    roll_order_header = f"```ansi\n{ANSI_HEADER}# Roll Order #{ANSI_RESET}\n==================================\n"
+    roll_order_header = f"```ansi\n{ANSI_HEADER}🔢 Roll Order 🔢{ANSI_RESET}\n==================================\n"
     roll_order_body = ""
     for i, r in enumerate(rolls):
         num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
