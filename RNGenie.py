@@ -452,8 +452,8 @@ class LootModal(nextcord.ui.Modal):
     def __init__(self):
         super().__init__("RNGenie Loot Manager")
         self.loot_items = nextcord.ui.TextInput(
-            label="List Your Loot Items Below Per Each Line Then Click Submit", 
-            placeholder="Type your items here\nEach new line is considered an item", 
+            label="List Items Below (One Per Line) Then Submit", 
+            placeholder="Type your items here\nEach line is considered an item", 
             required=True, 
             style=nextcord.TextInputStyle.paragraph,
             max_length=1000
