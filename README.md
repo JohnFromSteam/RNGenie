@@ -2,7 +2,7 @@
 
 RNGenie is a powerful yet easy-to-use Discord bot designed to manage turn-based loot distribution for games and events. It uses a fair "snake draft" system, a modern slash command (`/loot`), and a dynamic two-message interface that keeps your chat clean and merges into a final summary.
 
-[![RNGenie: A Discord Loot Distribution Bot](https://img.youtube.com/vi/u4bAoasJTRQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=u4bAoasJTRQ)
+[![RNGenie: A Discord Loot Distribution Bot](https://img.youtube.com/vi/gKJX9DPIpS0/maxresdefault.jpg)](https://www.youtube.com/watch?v=gKJX9DPIpS0)
 
 ---
 
