@@ -113,8 +113,8 @@ def build_management_message(session):
         footer = (
             f"🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
             f"**{picker_emoji} It is {picker.mention}'s {turn_text} **\n\n"
-            f"✍️ **{invoker.mention} must assign or skip.**\n"
-            f"**{picker.mention} may select items below.**"
+            f"✍️ **{invoker.mention} or**\n\n"
+            f"**{picker_emoji} {picker.mention} can assign the item or skip.**"
         )
     else:
         footer = (
@@ -266,22 +266,32 @@ class LootControlView(nextcord.ui.View):
                 if "item_select" in child.custom_id: child.callback = self.on_item_select
 
     async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
-        """Determines who can interact with the UI components."""
+        """
+        Determines who can interact with the UI components.
+        - The invoker (Loot Master) can use all components.
+        - The person whose turn it is can use the item dropdowns and the skip button.
+        - All others are denied.
+        """
         session = loot_sessions.get(self.session_id)
         if not session:
             await interaction.response.send_message("❌ This loot session has expired or could not be found.", ephemeral=True)
             return False
-
         if interaction.user.id == session["invoker_id"]:
             return True
 
-        is_picking_turn = session["current_turn"] >= 0
+        is_picking_turn = 0 <= session["current_turn"] < len(session["rolls"])
         if is_picking_turn:
             picker = session["rolls"][session["current_turn"]]["member"]
-            if interaction.user.id == picker.id and interaction.data.get('custom_id', '').startswith('item_select'):
-                return True
-
-        await interaction.response.send_message("🛡️ Only the Loot Master may assign/skip. The current player may select items.", ephemeral=True)
+            
+            if interaction.user.id == picker.id:
+                custom_id = interaction.data.get('custom_id', '')
+                if custom_id.startswith('item_select') or custom_id == 'skip_button':
+                    return True
+                
+        await interaction.response.send_message(
+            "🛡️ Only the Loot Master may assign items. The current player may select items or skip their turn.", 
+            ephemeral=True
+        )
         return False
 
     async def update_messages(self, interaction: nextcord.Interaction):
