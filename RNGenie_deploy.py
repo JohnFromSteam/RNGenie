@@ -236,7 +236,7 @@ class LootControlView(nextcord.ui.View):
                 item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
                 for i, chunk in enumerate(item_chunks):
                     options = []
-                    selected_values = session.get("selected_items", [])
+                    selected_values = session.get("selected_items") or []
                     for original_index, item_dict in chunk:
                         is_selected = str(original_index) in selected_values
                         label_text = f"{original_index + 1}. {item_dict['name']}"
