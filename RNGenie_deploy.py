@@ -481,11 +481,13 @@ class LootModal(nextcord.ui.Modal):
         rolls = [{"member": m, "roll": random.randint(1, 100)} for m in members_in_channel]
         rolls.sort(key=lambda x: x['roll'], reverse=True)
         
-        # Create a list of item dictionaries. Each item gets a permanent display number.
+        # First, filter out empty lines to get a clean list of item names.
+        item_names = [line.strip() for line in self.loot_items.value.split('\n') if line.strip()]
+        
+        # Then, enumerate the clean list to create the final data structure with sequential numbers.
         items_data = [
-            {"name": line.strip(), "assigned_to": None, "display_number": i}
-            for i, line in enumerate(self.loot_items.value.split('\n'), 1)
-            if line.strip()
+            {"name": name, "assigned_to": None, "display_number": i}
+            for i, name in enumerate(item_names, 1)
         ]
         if not items_data:
             await interaction.followup.send("⚠️ You must enter at least one item.", ephemeral=True)
