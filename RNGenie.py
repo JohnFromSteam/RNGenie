@@ -68,7 +68,7 @@ def build_control_panel_message(session):
     invoker = session["invoker"]
     rolls = session["rolls"]
 
-    header = f"**(2/2)**\n🎉 **Loot roll started by {invoker.mention}!**\n\n"
+    header = f"**(2/2)**\n\n🎉 **Loot roll started by {invoker.mention}!**\n\n"
 
     # --- Part 1: Roll Order ---
     roll_order_header = f"```ansi\n{ANSI_HEADER}🔢 Roll Order 🔢{ANSI_RESET}\n==================================\n"
@@ -107,7 +107,7 @@ def build_control_panel_message(session):
         footer = (
             f"🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
             f"**{picker_emoji} It is {picker.mention}'s {turn_text} **\n\n"
-            f"✍️ **{picker.mention} or {invoker.mention} must select items or skip.**"
+            f"✍️ **{picker.mention}\nor {invoker.mention} must select items or skip.**"
         )
     else:
         footer = f"🎁 **Loot distribution is ready!**\n\n✍️ **{invoker.mention} can remove participants or click below to begin.**"
