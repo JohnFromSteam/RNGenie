@@ -110,7 +110,7 @@ def build_control_panel_message(session):
             f"✍️ **Loot Manager {invoker.mention}\nor {picker.mention} must select items or skip.**"
         )
     else:
-        footer = f"🎁 **Loot distribution is ready!**\n\n✍️ **{invoker.mention} can remove participants or click below to begin.**"
+        footer = f"🎁 **Loot distribution is ready!**\n\n✍️ **Loot Manager {invoker.mention} can remove participants or click below to begin.**"
 
     return f"{header}{roll_order_section}\n{assigned_items_section}\n{footer}"
 
