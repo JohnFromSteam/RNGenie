@@ -12,26 +12,22 @@ import traceback
 # BOT SETUP
 # ===================================================================================================
 
+# Define the necessary intents for the bot to see members and their voice states.
 intents = nextcord.Intents.default()
 intents.members = True
 intents.voice_states = True
 
+# Initialize the bot and a dictionary to hold active loot sessions.
 bot = commands.Bot(intents=intents)
 loot_sessions = {}
 
+# A dictionary to map numbers to their emoji equivalents for pretty formatting.
 NUMBER_EMOJIS = {
     1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣",
     6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟",
     11: "1️⃣1️⃣", 12: "1️⃣2️⃣", 13: "1️⃣3️⃣", 14: "1️⃣4️⃣", 15: "1️⃣5️⃣",
     16: "1️⃣6️⃣", 17: "1️⃣7️⃣", 18: "1️⃣8️⃣", 19: "1️⃣9️⃣", 20: "2️⃣0️⃣"
 }
-
-# ANSI color codes
-ANSI_RESET = "\u001b[0m"
-ANSI_HEADER = "\u001b[0;33m"
-ANSI_USER = "\u001b[0;34m"
-ANSI_NOT_TAKEN = "\u001b[0;31m"
-ANSI_ASSIGNED = "\u001b[0;32m"
 
 
 # ===================================================================================================
@@ -78,7 +74,7 @@ def build_main_panel(session, timed_out=False):
     for i, roll_info in enumerate(rolls):
         member = roll_info["member"]
         num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        distribution_body += f"==================================\n{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n\n"
+        distribution_body += f"==================================\n[{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}]\n\n"
         if member.id in assigned_items:
             for item_name in assigned_items[member.id]:
                 distribution_body += f"{item_name}\n"
@@ -94,6 +90,7 @@ def build_main_panel(session, timed_out=False):
         if remaining_items:
             remaining_header = f"```ansi\n{ANSI_HEADER}❌ Unclaimed Items ❌{ANSI_RESET}\n==================================\n"
             remaining_body = ""
+            # Correctly iterates through all original items to preserve numbering.
             for i, item in enumerate(session["items"], 1):
                 if not item["assigned_to"]:
                     remaining_body += f"{i}. {item['name']}\n"
@@ -227,15 +224,12 @@ class LootControlView(nextcord.ui.View):
             await interaction.response.send_message("❌ This loot session has expired or could not be found.", ephemeral=True)
             return False
         
-        # The Loot Master can always do everything.
         if interaction.user.id == session["invoker_id"]:
             return True
         
-        # If it's the picking phase, check if the user is the current picker.
         if session["current_turn"] >= 0:
             current_picker_id = session["rolls"][session["current_turn"]]["member"].id
             if interaction.user.id == current_picker_id:
-                # The current picker is only allowed to select items or click assign.
                 allowed_actions = ["assign_button"]
                 if "item_select" in interaction.data.get("custom_id", ""):
                     return True
@@ -350,7 +344,6 @@ class LootControlView(nextcord.ui.View):
 # ===================================================================================================
 
 class LootModal(nextcord.ui.Modal):
-    """A pop-up window that prompts the user to enter the list of loot items."""
     def __init__(self):
         super().__init__("RNGenie Loot Setup")
         self.loot_items = nextcord.ui.TextInput(
@@ -363,7 +356,6 @@ class LootModal(nextcord.ui.Modal):
         self.add_item(self.loot_items)
 
     async def callback(self, interaction: nextcord.Interaction):
-        """Executed after modal submission. Gathers data and creates the initial loot session message."""
         await interaction.response.defer(ephemeral=True)
         if not interaction.user.voice or not interaction.user.voice.channel:
             await interaction.followup.send("❌ You must be in a voice channel to set up a loot roll.", ephemeral=True)
@@ -426,7 +418,6 @@ class LootModal(nextcord.ui.Modal):
 
 @bot.slash_command(name="loot", description="Starts a turn-based loot roll for your voice channel.")
 async def loot(interaction: nextcord.Interaction):
-    """The entry point for the loot command."""
     if not interaction.user.voice:
         await interaction.response.send_message("❌ You need to be in a voice channel to start a loot roll!", ephemeral=True)
         return
@@ -440,7 +431,6 @@ async def loot(interaction: nextcord.Interaction):
 
 @bot.event
 async def on_ready():
-    """Event that fires when the bot successfully logs in."""
     print(f'Logged in as {bot.user}')
     print('RNGenie is ready for local debugging.')
     print('------')
