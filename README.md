@@ -70,8 +70,9 @@ You can run RNGenie locally for testing or deploy it to a 24/7 hosting provider.
     -   Under "Bot Permissions", select the following:
         -   `View Channels`
         -   `Send Messages`
-        -   `Read Message History` (to edit its own messages)
-        -   `Manage Messages` (to delete the loot list message on completion)
+        -   `Read Message History`
+        -   `Use Slash Commands`
+        -   `Connect`
     -   Copy the generated URL and paste it into your browser to invite the bot to your server.
 
 7.  **Run the Bot:**
