@@ -418,7 +418,7 @@ class LootModal(nextcord.ui.Modal):
             return
         
         voice_channel = interaction.guild.get_channel(interaction.user.voice.channel.id)
-        members = [member for member in voice_channel.members if not member.bot]
+        members = [member for member in voice_channel.members]
         
         if len(members) > 20:
             await interaction.followup.send(f"❌ Too many users in the voice channel ({len(members)})! The maximum is 20.", ephemeral=True)
