@@ -374,23 +374,22 @@ class LootControlView(nextcord.ui.View):
         self.update_components()
         await interaction.response.edit_message(view=self)
 
-    async def on_assign(self, interaction: nextcord.Interaction):
-        """Callback for the 'Assign Selected' button."""
-        session = loot_sessions.get(self.session_id)
-        if not session: return
-        
-        selected_indices = session.get("selected_items", [])
-        if not selected_indices: 
-            await interaction.response.defer()
-            return
-            
-        current_picker_id = session["rolls"][session["current_turn"]]["member"].id
-        for index_str in selected_indices:
-            session["items"][int(index_str)]["assigned_to"] = current_picker_id
-        
-        session["selected_items"] = None
-        self._advance_turn_snake(session)
-        await self.update_messages(interaction)
+async def on_assign(self, interaction: nextcord.Interaction):
+    session = loot_sessions.get(self.session_id)
+    if not session: return
+
+    selected_indices = session.get("selected_items") or []
+    if not selected_indices:
+        await interaction.response.defer()
+        return
+
+    current_picker_id = session["rolls"][session["current_turn"]]["member"].id
+    for index_str in selected_indices:
+        session["items"][int(index_str)]["assigned_to"] = current_picker_id
+    
+    session["selected_items"] = None
+    self._advance_turn_snake(session)
+    await self.update_message(interaction)
 
     async def on_skip(self, interaction: nextcord.Interaction):
         """Callback for the 'Skip Turn' or 'Start' button."""
