@@ -29,6 +29,13 @@ NUMBER_EMOJIS = {
     16: "1️⃣6️⃣", 17: "1️⃣7️⃣", 18: "1️⃣8️⃣", 19: "1️⃣9️⃣", 20: "2️⃣0️⃣"
 }
 
+# ANSI color codes for direct color control in Discord 'ansi' code blocks.
+ANSI_RESET = "\u001b[0m"
+ANSI_HEADER = "\u001b[0;33m"      # Yellow/Orange
+ANSI_USER = "\u001b[0;34m"        # Blue
+ANSI_NOT_TAKEN = "\u001b[0;31m"  # Red
+ANSI_ASSIGNED = "\u001b[0;32m"    # Green
+
 
 # ===================================================================================================
 # MESSAGE BUILDERS
@@ -87,6 +94,7 @@ def build_main_panel(session, timed_out=False):
     remaining_items = [item for item in session["items"] if not item["assigned_to"]]
 
     if is_finished or timed_out:
+        # If the session is over, show unclaimed items in the main panel.
         if remaining_items:
             remaining_header = f"```ansi\n{ANSI_HEADER}❌ Unclaimed Items ❌{ANSI_RESET}\n==================================\n"
             remaining_body = ""
@@ -97,6 +105,7 @@ def build_main_panel(session, timed_out=False):
             remaining_footer = "==================================\n```"
             remaining_section = remaining_header + remaining_body + remaining_footer
     elif remaining_items:
+        # If the session is active, build the dynamic footer.
         if session["current_turn"] >= 0:
             picker = session["rolls"][session["current_turn"]]["member"]
             direction_text = "Normal Order" if session["direction"] == 1 else "Reverse Order"
