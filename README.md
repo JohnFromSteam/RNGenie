@@ -54,7 +54,7 @@ You can run RNGenie locally for testing or deploy it to a 24/7 hosting provider.
 4.  **Create a Discord Bot Application:**
     -   Go to the [Discord Developer Portal](https://discord.com/developers/applications) and create a "New Application".
     -   Go to the "Bot" tab and click "Add Bot".
-    -   Under **Privileged Gateway Intents**, enable **SERVER MEMBERS INTENT**. This is crucial for the bot to find users in a voice channel.
+    -   Under **Privileged Gateway Intents**, enable **Presence Intent**, **Server Members Intent**, and **Message Content Intent**.
     -   Click "Reset Token" to reveal your bot's token. **Keep this token private!**
 
 5.  **Create a `.env` File:**
