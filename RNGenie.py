@@ -181,53 +181,72 @@ class LootControlView(nextcord.ui.View):
         """
         session = loot_sessions.get(self.session_id)
         self.clear_items()
-        if not session or not self._are_items_left(session): return
+        if not session: return
 
-        is_picking_turn = session["current_turn"] >= 0 and session["current_turn"] < len(session["rolls"])
-        
-        if is_picking_turn:
-            # Get unassigned items, preserving their original index for the select menu's value.
-            available_items = [(index, item) for index, item in enumerate(session["items"]) if not item["assigned_to"]]
-            
-            if available_items:
-                # Discord select menus are limited to 25 options, so we chunk larger lists into multiple dropdowns.
-                item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
+        # If the loot assignment has finished, do not add any components.
+        if not self._are_items_left(session):
+            return
 
-                for i, chunk in enumerate(item_chunks):
-                    options = []
-                    selected_values = session.get("selected_items") or []
-                    
-                    # Each item_tuple is (original_index, item_dictionary).
-                    for original_index, item_dict in chunk:
-                        is_selected = str(original_index) in selected_values
-                        # Use the persistent `display_number` for a consistent user experience.
-                        label_text = f"{item_dict['display_number']}. {item_dict['name']}"
-                        truncated_label = (label_text[:97] + '...') if len(label_text) > 100 else label_text
-                        options.append(nextcord.SelectOption(
-                            label=truncated_label,
-                            value=str(original_index), # The value must be the original index for assignment logic.
-                            default=is_selected
-                        ))
-                    
-                    placeholder = "Choose one or more items to claim..."
-                    if len(item_chunks) > 1:
-                        # Use display numbers in the placeholder for clarity across chunks.
-                        start_num = chunk[0][1]['display_number']
-                        end_num = chunk[-1][1]['display_number']
-                        placeholder = f"Choose items ({start_num}-{end_num})..."
-
-                    self.add_item(nextcord.ui.Select(
-                        placeholder=placeholder, options=options, custom_id=f"item_select_{i}", 
-                        min_values=0, max_values=len(options)
-                    ))
-            
-            assign_button_disabled = not session.get("selected_items")
-            self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.green, emoji="✅", custom_id="assign_button", disabled=assign_button_disabled))
-        
-        # Show "Start" button before turn 0, and "Skip" button during turns.
+        # ================== NEW: PRE-LOOT MANAGEMENT UI ==================
+        # If the session hasn't started, show participant management tools.
         if session["current_turn"] == -1:
-            self.add_item(nextcord.ui.Button(label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="skip_button"))
+            if session["rolls"]: # Only show if there are members to remove.
+                member_options = [
+                    nextcord.SelectOption(label=r['member'].display_name, value=str(r['member'].id))
+                    for r in session["rolls"]
+                ]
+                self.add_item(nextcord.ui.Select(
+                    placeholder="Select participants to remove...",
+                    options=member_options,
+                    custom_id="remove_select",
+                    min_values=0,
+                    max_values=len(member_options)
+                ))
+            
+            remove_button_disabled = not session.get("members_to_remove")
+            self.add_item(nextcord.ui.Button(
+                label="Remove Selected", style=nextcord.ButtonStyle.secondary, emoji="✖️", 
+                custom_id="remove_confirm_button", disabled=remove_button_disabled
+            ))
+            
+            self.add_item(nextcord.ui.Button(
+                label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="skip_button"
+            ))
+
+        # ================== EXISTING: ITEM ASSIGNMENT UI ==================
+        # If the session is active, show the item selection tools.
         else:
+            is_picking_turn = session["current_turn"] >= 0 and session["current_turn"] < len(session["rolls"])
+            if is_picking_turn:
+                available_items = [(index, item) for index, item in enumerate(session["items"]) if not item["assigned_to"]]
+                
+                if available_items:
+                    item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
+                    for i, chunk in enumerate(item_chunks):
+                        options = []
+                        selected_values = session.get("selected_items") or []
+                        for original_index, item_dict in chunk:
+                            is_selected = str(original_index) in selected_values
+                            label_text = f"{item_dict['display_number']}. {item_dict['name']}"
+                            truncated_label = (label_text[:97] + '...') if len(label_text) > 100 else label_text
+                            options.append(nextcord.SelectOption(
+                                label=truncated_label, value=str(original_index), default=is_selected
+                            ))
+                        
+                        placeholder = "Choose one or more items to claim..."
+                        if len(item_chunks) > 1:
+                            start_num = chunk[0][1]['display_number']
+                            end_num = chunk[-1][1]['display_number']
+                            placeholder = f"Choose items ({start_num}-{end_num})..."
+
+                        self.add_item(nextcord.ui.Select(
+                            placeholder=placeholder, options=options, custom_id=f"item_select_{i}", 
+                            min_values=0, max_values=len(options)
+                        ))
+                
+                assign_button_disabled = not session.get("selected_items")
+                self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.green, emoji="✅", custom_id="assign_button", disabled=assign_button_disabled))
+            
             self.add_item(nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button"))
         
         # Dynamically assign callbacks to the newly created components.
@@ -236,6 +255,9 @@ class LootControlView(nextcord.ui.View):
                 if child.custom_id == "assign_button": child.callback = self.on_assign
                 if child.custom_id == "skip_button": child.callback = self.on_skip
                 if "item_select" in child.custom_id: child.callback = self.on_item_select
+                if child.custom_id == "remove_select": child.callback = self.on_remove_select # NEW
+                if child.custom_id == "remove_confirm_button": child.callback = self.on_remove_confirm # NEW
+
 
     async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
         """
@@ -257,15 +279,14 @@ class LootControlView(nextcord.ui.View):
             current_picker = session["rolls"][session["current_turn"]]["member"]
             if interaction.user.id == current_picker.id:
                 return True
-
-        # If the check fails, build and send a helpful ephemeral (private) error message.
+        
         invoker_mention = session["invoker"].mention
         if is_picking_turn:
             picker_mention = session["rolls"][session["current_turn"]]["member"].mention
             error_message = f"🛡️ It's not your turn! Only the Loot Master ({invoker_mention}) or the current picker ({picker_mention}) can interact."
         else:
-            # This case handles the "Start Loot Assignment!" button before turn 0.
-            error_message = f"🛡️ Only the Loot Master ({invoker_mention}) can start the assignment."
+            # This case handles the "Start" button and new removal buttons.
+            error_message = f"🛡️ Only the Loot Master ({invoker_mention}) can manage participants or start the assignment."
         
         await interaction.response.send_message(error_message, ephemeral=True)
         return False
@@ -278,8 +299,7 @@ class LootControlView(nextcord.ui.View):
         content = build_dynamic_loot_message(session)
         self.update_components()
         
-        # If no items are left, end the session and remove the interactive components.
-        if not self._are_items_left(session):
+        if not self._are_items_left(session) and session["current_turn"] != -1:
             await interaction.message.edit(content=content, view=None)
             loot_sessions.pop(self.session_id, None)
         else:
@@ -299,10 +319,39 @@ class LootControlView(nextcord.ui.View):
                 final_content = build_dynamic_loot_message(session, timed_out=True)
                 await message.edit(content=final_content, view=None)
         except (nextcord.NotFound, nextcord.Forbidden):
-            # Ignore errors if the message or channel was deleted.
             pass
         finally:
             loot_sessions.pop(self.session_id, None)
+
+    # ================== NEW: Participant Removal Callbacks ==================
+
+    async def on_remove_select(self, interaction: nextcord.Interaction):
+        """Callback for when the Loot Master selects users to remove."""
+        session = loot_sessions.get(self.session_id)
+        if not session: return
+        
+        session["members_to_remove"] = interaction.data["values"]
+        
+        self.update_components()
+        await interaction.response.edit_message(view=self)
+
+    async def on_remove_confirm(self, interaction: nextcord.Interaction):
+        """Callback for the 'Remove Selected' button."""
+        session = loot_sessions.get(self.session_id)
+        if not session: return
+        
+        ids_to_remove = set(int(id_str) for id_str in session.get("members_to_remove", []))
+        if not ids_to_remove:
+            await interaction.response.defer()
+            return
+        
+        # Filter the rolls list, keeping only members whose IDs are NOT in the removal set.
+        session["rolls"] = [r for r in session["rolls"] if r["member"].id not in ids_to_remove]
+        session["members_to_remove"] = None # Clear the selection.
+        
+        await self.update_message(interaction)
+
+    # ================== EXISTING: Item Assignment Callbacks ==================
 
     async def on_item_select(self, interaction: nextcord.Interaction):
         """Callback for when a user selects one or more items from any dropdown."""
@@ -312,19 +361,16 @@ class LootControlView(nextcord.ui.View):
         newly_selected_values = interaction.data["values"]
         dropdown_index = int(interaction.data["custom_id"].split("_")[-1])
         
-        # This logic correctly merges selections from multiple dropdowns if they exist.
         available_items = [(index, item) for index, item in enumerate(session["items"]) if not item["assigned_to"]]
         item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
         possible_values_in_this_dropdown = {str(index) for index, item in item_chunks[dropdown_index]}
 
         current_master_selection = set(session.get("selected_items") or [])
-        # Remove old selections from this specific dropdown, then add the new ones.
         current_master_selection -= possible_values_in_this_dropdown
         current_master_selection.update(newly_selected_values)
 
         session["selected_items"] = list(current_master_selection)
         
-        # Respond to the interaction by updating the view components (e.g., enabling the assign button).
         self.update_components()
         await interaction.response.edit_message(view=self)
 
@@ -340,7 +386,7 @@ class LootControlView(nextcord.ui.View):
             for index_str in selected_indices:
                 session["items"][int(index_str)]["assigned_to"] = current_picker_id
         
-        session["selected_items"] = None # Clear selection after assigning.
+        session["selected_items"] = None
         self._advance_turn_snake(session)
         await self.update_message(interaction)
 
@@ -349,7 +395,14 @@ class LootControlView(nextcord.ui.View):
         session = loot_sessions.get(self.session_id)
         if not session: return
 
-        session["selected_items"] = None # Clear any accidental selections.
+        # This button now serves two purposes. If the session hasn't started,
+        # it will start it. If it has, it skips the current turn.
+        session["selected_items"] = None 
+        
+        # If starting, we also clear any lingering removal selections.
+        if session["current_turn"] == -1:
+            session["members_to_remove"] = None
+            
         self._advance_turn_snake(session)
         await self.update_message(interaction)
 
@@ -364,9 +417,10 @@ class LootModal(nextcord.ui.Modal):
         super().__init__("RNGenie Loot Setup!")
         self.loot_items = nextcord.ui.TextInput(
             label="List Your Loot Items Below (One Per Line)", 
-            placeholder="Blade of Eternal Justice\nShield of the Unwavering...\n...", 
+            placeholder="Type your items here\nEach new line is considered an item", 
             required=True, 
-            style=nextcord.TextInputStyle.paragraph
+            style=nextcord.TextInputStyle.paragraph,
+            max_length=1000
         )
         self.add_item(self.loot_items)
 
@@ -404,11 +458,11 @@ class LootModal(nextcord.ui.Modal):
             return
         
         # Construct the initial session state dictionary.
-        session = { 
-            "rolls": rolls, "items": items_data, "current_turn": -1, 
+        session = {
+            "rolls": rolls, "items": items_data, "current_turn": -1,
             "invoker_id": interaction.user.id, "invoker": interaction.user,
             "selected_items": None, "round": 0, "direction": 1,
-            "just_reversed": False
+            "just_reversed": False, "members_to_remove": None
         }
         
         # Send an initial message, waiting for it to be created to get its ID.
