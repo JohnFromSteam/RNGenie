@@ -375,6 +375,7 @@ class LootControlView(nextcord.ui.View):
         await interaction.response.edit_message(view=self)
 
     async def on_assign(self, interaction: nextcord.Interaction):
+        """Callback for the 'Assign Selected' button."""
         session = loot_sessions.get(self.session_id)
         if not session: return
 
@@ -389,16 +390,16 @@ class LootControlView(nextcord.ui.View):
         
         session["selected_items"] = None
         self._advance_turn_snake(session)
-        await self.update_message(interaction)
+        await self.update_messages(interaction)
 
-        async def on_skip(self, interaction: nextcord.Interaction):
-            """Callback for the 'Skip Turn' or 'Start' button."""
-            session = loot_sessions.get(self.session_id)
-            if not session: return
+    async def on_skip(self, interaction: nextcord.Interaction):
+        """Callback for the 'Skip Turn' or 'Start' button."""
+        session = loot_sessions.get(self.session_id)
+        if not session: return
 
-            session["selected_items"] = None
-            self._advance_turn_snake(session)
-            await self.update_messages(interaction)
+        session["selected_items"] = None
+        self._advance_turn_snake(session)
+        await self.update_messages(interaction)
 
 
 # ===================================================================================================
