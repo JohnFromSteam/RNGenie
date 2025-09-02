@@ -73,11 +73,11 @@ def build_control_panel_message(session, timed_out=False):
 
     # --- Part 1: Header ---
     if timed_out:
-        header = f"**(2/2)**\n⌛ **The loot session has timed out due to 30 minutes of inactivity!**\n\n"
+        header = f"⌛ **The loot session has timed out due to 30 minutes of inactivity!**\n\n"
     elif not any(not item["assigned_to"] for item in session["items"]):
-        header = f"**(2/2)**\n✅ **All items have been assigned! Looting has concluded!**\n\n"
+        header = f"✅ **All items have been assigned! Looting has concluded!**\n\n"
     else:
-        header = f"**(2/2)**\n🎉 **Loot roll started by {invoker.mention}!**\n\n"
+        header = f"**(2/2)**\n\n🎉 **Loot roll started by {invoker.mention}!**\n\n"
 
     # --- Part 2: Roll Order ---
     roll_order_header = f"```ansi\n{ANSI_HEADER}🔢 Roll Order 🔢{ANSI_RESET}\n==================================\n"
