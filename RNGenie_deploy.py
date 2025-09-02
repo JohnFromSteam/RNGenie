@@ -186,16 +186,22 @@ class LootControlView(nextcord.ui.View):
             if session["rolls"]:
                 selected_values = session.get("members_to_remove") or []
                 member_options = []
-                for r in session["rolls"]:
-                    is_selected = str(r['member'].id) in selected_values
-                    member_options.append(nextcord.SelectOption(
-                        label=r['member'].display_name, value=str(r['member'].id), default=is_selected
-                    ))
+                invoker_id = session["invoker_id"] # Get the invoker's ID
 
-                self.add_item(nextcord.ui.Select(
-                    placeholder="Select participants to remove...", options=member_options,
-                    custom_id="remove_select", min_values=0, max_values=len(member_options)
-                ))
+                # Create options only for members who are NOT the invoker
+                for r in session["rolls"]:
+                    if r['member'].id != invoker_id:
+                        is_selected = str(r['member'].id) in selected_values
+                        member_options.append(nextcord.SelectOption(
+                            label=r['member'].display_name, value=str(r['member'].id), default=is_selected
+                        ))
+
+                # Only show the dropdown if there are other members who can be removed
+                if member_options:
+                    self.add_item(nextcord.ui.Select(
+                        placeholder="Select participants to remove...", options=member_options,
+                        custom_id="remove_select", min_values=0, max_values=len(member_options)
+                    ))
             
             remove_button_disabled = not session.get("members_to_remove")
             self.add_item(nextcord.ui.Button(
