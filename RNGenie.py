@@ -107,7 +107,7 @@ def build_control_panel_message(session):
         footer = (
             f"🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
             f"**{picker_emoji} It is {picker.mention}'s {turn_text} **\n\n"
-            f"✍️ **Loot Manager {picker.mention}\nor {invoker.mention} must select items or skip.**"
+            f"✍️ **Loot Manager {invoker.mention}\nor {picker.mention} must select items or skip.**"
         )
     else:
         footer = f"🎁 **Loot distribution is ready!**\n\n✍️ **{invoker.mention} can remove participants or click below to begin.**"
