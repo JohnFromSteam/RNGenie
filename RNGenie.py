@@ -4,6 +4,7 @@
 import os
 import traceback
 import random
+import re
 from dotenv import load_dotenv
 import nextcord
 from nextcord.ext import commands
