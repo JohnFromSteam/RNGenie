@@ -4,6 +4,7 @@
 import os
 import traceback
 import random
+import re
 from dotenv import load_dotenv
 import nextcord
 from nextcord.ext import commands
@@ -548,10 +549,34 @@ class LootModal(nextcord.ui.Modal):
         rolls = [{"member": m, "roll": random.randint(1, 100)} for m in members_in_channel]
         rolls.sort(key=lambda x: x['roll'], reverse=True)
         
-        # First, filter out empty lines to get a clean list of item names.
-        item_names = [line.strip() for line in self.loot_items.value.split('\n') if line.strip()]
+        # Parse the input, handling the "Nx Item Name" syntax for stacked items.
+        item_names = []
+        raw_lines = self.loot_items.value.split('\n')
+
+        for line in raw_lines:
+            stripped_line = line.strip()
+            if not stripped_line:
+                continue
+
+            # Check for the "Nx" prefix using a regular expression.
+            # This looks for a number (e.g., 2), followed by 'x' or 'X', then optional space.
+            match = re.match(r"(\d+)[xX]\s*(.*)", stripped_line)
+            
+            if match:
+                try:
+                    count = int(match.group(1))
+                    name = match.group(2).strip()
+                    if name:  # Ensure the item name is not empty after the prefix.
+                        # Add the item 'count' times to the list.
+                        item_names.extend([name] * count)
+                except (ValueError, IndexError):
+                    # If something goes wrong with parsing, treat the line as a regular item.
+                    item_names.append(stripped_line)
+            else:
+                # If no "Nx" prefix is found, add the item to the list once.
+                item_names.append(stripped_line)
         
-        # Then, enumerate the clean list to create the final data structure with sequential numbers.
+        # Now, enumerate the fully expanded list to create the final data structure with sequential numbers.
         items_data = [
             {"name": name, "assigned_to": None, "display_number": i}
             for i, name in enumerate(item_names, 1)
