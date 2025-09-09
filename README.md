@@ -2,7 +2,7 @@
 
 RNGenie is a powerful yet easy-to-use Discord bot designed to manage turn-based loot distribution for games and events. It uses a fair "snake draft" system, a modern slash command (`/loot`), and a dynamic two-message interface that keeps your chat clean and merges into a final summary.
 
-[![RNGenie: A Discord Loot Distribution Bot](https://img.youtube.com/vi/u4bAoasJTRQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=u4bAoasJTRQ)
+[![RNGenie: A Discord Loot Distribution Bot](https://img.youtube.com/vi/gKJX9DPIpS0/maxresdefault.jpg)](https://www.youtube.com/watch?v=gKJX9DPIpS0)
 
 ---
 
@@ -54,7 +54,7 @@ You can run RNGenie locally for testing or deploy it to a 24/7 hosting provider.
 4.  **Create a Discord Bot Application:**
     -   Go to the [Discord Developer Portal](https://discord.com/developers/applications) and create a "New Application".
     -   Go to the "Bot" tab and click "Add Bot".
-    -   Under **Privileged Gateway Intents**, enable **SERVER MEMBERS INTENT**. This is crucial for the bot to find users in a voice channel.
+    -   Under **Privileged Gateway Intents**, enable **Presence Intent**, **Server Members Intent**, and **Message Content Intent**.
     -   Click "Reset Token" to reveal your bot's token. **Keep this token private!**
 
 5.  **Create a `.env` File:**
@@ -70,8 +70,9 @@ You can run RNGenie locally for testing or deploy it to a 24/7 hosting provider.
     -   Under "Bot Permissions", select the following:
         -   `View Channels`
         -   `Send Messages`
-        -   `Read Message History` (to edit its own messages)
-        -   `Manage Messages` (to delete the loot list message on completion)
+        -   `Read Message History`
+        -   `Use Slash Commands`
+        -   `Connect`
     -   Copy the generated URL and paste it into your browser to invite the bot to your server.
 
 7.  **Run the Bot:**
