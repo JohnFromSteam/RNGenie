@@ -94,7 +94,7 @@ def build_control_panel_message(session):
         assigned_items_body += f"==================================\n{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n"
         if assigned_items_map[member.id]:
             for item_name in assigned_items_map[member.id]:
-                assigned_items_body += f"   - {item_name}\n"
+                assigned_items_body += f"- {item_name}\n"
     
     assigned_items_footer = "==================================\n```"
     assigned_items_section = assigned_items_header + assigned_items_body + assigned_items_footer
@@ -151,7 +151,7 @@ def build_control_panel_message(session):
         assigned_items_body += f"{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n"
         if assigned_items_map[member.id]:
             for item_name in assigned_items_map[member.id]:
-                assigned_items_body += f"   - {item_name}\n"
+                assigned_items_body += f"- {item_name}\n"
     
     assigned_items_footer = "==================================\n```"
     assigned_items_section = assigned_items_header + assigned_items_body + assigned_items_footer
@@ -210,9 +210,9 @@ def build_final_summary_message(session, timed_out=False):
         assigned_items_body += f"{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n"
         if assigned_items_map[member.id]:
             for item_name in assigned_items_map[member.id]:
-                assigned_items_body += f"   - {item_name}\n"
+                assigned_items_body += f"- {item_name}\n"
         else:
-            assigned_items_body += "   - N/A\n"
+            assigned_items_body += "- N/A\n"
             
     assigned_items_footer = "==================================\n```"
     assigned_items_section = assigned_items_header + assigned_items_body + assigned_items_footer
