@@ -117,6 +117,62 @@ def build_control_panel_message(session):
     return f"{header}{roll_order_section}\n{assigned_items_section}\n{footer}"
 
 
+def build_control_panel_message(session):
+    """Builds the content for the second message (2/2), the main control panel."""
+    invoker = session["invoker"]
+    rolls = session["rolls"]
+
+    header = f"**(2/2)**\n\n🎉 **Loot roll started by {invoker.mention}!**\n\n"
+
+    # --- Part 1: Roll Order ---
+    roll_order_header = f"```ansi\n{ANSI_HEADER}🔢 Roll Order 🔢{ANSI_RESET}\n==================================\n"
+    roll_order_body = ""
+    for i, roll_info in enumerate(rolls):
+        num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
+        roll_order_body += f"{num_emoji} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET} ({roll_info['roll']})\n"
+    roll_order_footer = "==================================\n```"
+    roll_order_section = roll_order_header + roll_order_body + roll_order_footer
+
+    # --- Part 2: Assigned Items (MODIFIED) ---
+    assigned_items_header = f"```ansi\n{ANSI_HEADER}✅ Assigned Items ✅{ANSI_RESET}\n==================================\n"
+    assigned_items_body = ""
+    assigned_items_map = {roll_info["member"].id: [] for roll_info in rolls}
+    for item in session["items"]:
+        if item["assigned_to"]:
+            assigned_items_map[item["assigned_to"]].append(item["name"])
+
+    # This loop no longer contains the "===" separator.
+    for i, roll_info in enumerate(rolls):
+        member = roll_info["member"]
+        num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
+        # Add a newline for spacing between users, but not before the first one.
+        if i > 0:
+            assigned_items_body += "\n"
+        assigned_items_body += f"{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n"
+        if assigned_items_map[member.id]:
+            for item_name in assigned_items_map[member.id]:
+                assigned_items_body += f"   - {item_name}\n"
+    
+    assigned_items_footer = "==================================\n```"
+    assigned_items_section = assigned_items_header + assigned_items_body + assigned_items_footer
+
+    # --- Part 3: Footer (Turn Indicator) ---
+    footer = ""
+    if session["current_turn"] >= 0:
+        picker = session["rolls"][session["current_turn"]]["member"]
+        direction_text = "Normal Order" if session["direction"] == 1 else "Reverse Order"
+        picker_emoji = NUMBER_EMOJIS.get(session['current_turn'] + 1, "👉")
+        turn_text = "turn again!" if session.get("just_reversed", False) else "turn!"
+        footer = (
+            f"🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
+            f"**{picker_emoji} It is {picker.mention}'s {turn_text} **\n\n"
+            f"✍️ **Loot Manager {invoker.mention}\nor {picker.mention} must select items or skip.**"
+        )
+    else:
+        footer = f"🎁 **Loot distribution is ready!**\n\n✍️ **Loot Manager {invoker.mention} can remove participants or click below to begin.**"
+
+    return f"{header}{roll_order_section}\n{assigned_items_section}\n{footer}"
+
 def build_final_summary_message(session, timed_out=False):
     """Builds the single, merged message shown when the session ends."""
     rolls = session["rolls"]
@@ -136,19 +192,22 @@ def build_final_summary_message(session, timed_out=False):
     roll_order_footer = "==================================\n```"
     roll_order_section = roll_order_header + roll_order_body + roll_order_footer
 
-    # --- Part 3: Final Assigned Items (same as control panel) ---
-    assigned_items_header = f"```ansi\n{ANSI_HEADER}✅ Final Assigned Items ✅{ANSI_RESET}\n"
+    # --- Part 3: Final Assigned Items (MODIFIED) ---
+    assigned_items_header = f"```ansi\n{ANSI_HEADER}✅ Final Assigned Items ✅{ANSI_RESET}\n==================================\n"
     assigned_items_body = ""
     assigned_items_map = {roll_info["member"].id: [] for roll_info in rolls}
     for item in session["items"]:
         if item["assigned_to"]:
             assigned_items_map[item["assigned_to"]].append(item["name"])
 
+    # This loop no longer contains the "===" separator.
     for i, roll_info in enumerate(rolls):
         member = roll_info["member"]
         num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        # MODIFIED: Changed formatting for assigned items list and added N/A
-        assigned_items_body += f"==================================\n{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n"
+        # Add a newline for spacing between users, but not before the first one.
+        if i > 0:
+            assigned_items_body += "\n"
+        assigned_items_body += f"{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n"
         if assigned_items_map[member.id]:
             for item_name in assigned_items_map[member.id]:
                 assigned_items_body += f"   - {item_name}\n"
@@ -167,59 +226,6 @@ def build_final_summary_message(session, timed_out=False):
         for item in unclaimed_items:
             unclaimed_body += f"{item['display_number']}. {item['name']}\n"
         unclaimed_footer = "==================================\n```"
-        unclaimed_section = unclaimed_header + unclaimed_body + unclaimed_footer
-
-    return f"{header}{roll_order_section}\n{assigned_items_section}\n{unclaimed_section}"
-
-
-def build_final_summary_message(session, timed_out=False):
-    """Builds the single, merged message shown when the session ends."""
-    rolls = session["rolls"]
-
-    # --- Part 1: Final Header ---
-    if timed_out:
-        header = "⌛ **The loot session has timed out! Here is the final summary:**\n\n"
-    else:
-        header = "✅ **All items have been assigned! Here is the final summary:**\n\n"
-
-    # --- Part 2: Roll Order (same as control panel) ---
-    roll_order_header = f"```ansi\n{ANSI_HEADER}🔢 Final Roll Order 🔢{ANSI_RESET}\n==================================\n"
-    roll_order_body = ""
-    for i, roll_info in enumerate(rolls):
-        num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        roll_order_body += f"{num_emoji} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET} ({roll_info['roll']})\n"
-    roll_order_footer = "==================================\n```"
-    roll_order_section = roll_order_header + roll_order_body + roll_order_footer
-
-    # --- Part 3: Final Assigned Items (same as control panel) ---
-    assigned_items_header = f"```ansi\n{ANSI_HEADER}✅ Final Assigned Items ✅{ANSI_RESET}\n"
-    assigned_items_body = ""
-    assigned_items_map = {roll_info["member"].id: [] for roll_info in rolls}
-    for item in session["items"]:
-        if item["assigned_to"]:
-            assigned_items_map[item["assigned_to"]].append(item["name"])
-
-    for i, roll_info in enumerate(rolls):
-        member = roll_info["member"]
-        num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        assigned_items_body += f"==================================\n\n{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n\n"
-        if assigned_items_map[member.id]:
-            for item_name in assigned_items_map[member.id]:
-                assigned_items_body += f"   - {item_name}\n"
-        else:
-            assigned_items_body += "No items assigned.\n"
-    assigned_items_footer = "==================================\n\n```"
-    assigned_items_section = assigned_items_header + assigned_items_body + assigned_items_footer
-    
-    # --- Part 4: Unclaimed Items (the merged part) ---
-    unclaimed_section = ""
-    unclaimed_items = [item for item in session["items"] if not item["assigned_to"]]
-    if unclaimed_items:
-        unclaimed_header = f"```ansi\n{ANSI_HEADER}❌ Unclaimed Items ❌{ANSI_RESET}\n==================================\n\n"
-        unclaimed_body = ""
-        for item in unclaimed_items:
-            unclaimed_body += f"{item['display_number']}. {item['name']}\n"
-        unclaimed_footer = "==================================\n\n```"
         unclaimed_section = unclaimed_header + unclaimed_body + unclaimed_footer
 
     return f"{header}{roll_order_section}\n{assigned_items_section}\n{unclaimed_section}"
