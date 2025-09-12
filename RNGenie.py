@@ -383,7 +383,7 @@ class LootControlView(nextcord.ui.View):
             picker = session["rolls"][session["current_turn"]]["member"]
             notification_content = (
                 f"🔔 **It's your turn to pick, {picker.mention}!**\n"
-                "Use the dropdowns on the message above to make your selection."
+                "Use the dropdowns on the message above to make your selection. Then click somewhere else to close the dropdowns for your selection to be updated. Then click '✅ Assign Selected' when you are ready."
             )
             try:
                 await interaction.followup.send(notification_content, ephemeral=True)
