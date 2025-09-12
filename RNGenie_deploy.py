@@ -6,6 +6,7 @@ import traceback
 import random
 import re
 from dotenv import load_dotenv
+from itertools import groupby
 import nextcord
 from nextcord.ext import commands
 
@@ -75,7 +76,14 @@ def build_control_panel_message(session):
     roll_order_body = ""
     for i, roll_info in enumerate(rolls):
         num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        roll_order_body += f"{num_emoji} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET} ({roll_info['roll']})\n"
+        
+        # Start with the base roll string.
+        roll_str = f"({roll_info['roll']})"
+        # If a tie-breaker roll exists, append it.
+        if 'tiebreaker_roll' in roll_info:
+            roll_str += f" (TIE BREAKER: {roll_info['tiebreaker_roll']})"
+            
+        roll_order_body += f"{num_emoji} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET} {roll_str}\n"
     roll_order_footer = "```"
     roll_order_section = roll_order_header + roll_order_body + roll_order_footer
 
@@ -134,7 +142,14 @@ def build_final_summary_message(session, timed_out=False):
     roll_order_body = ""
     for i, roll_info in enumerate(rolls):
         num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        roll_order_body += f"{num_emoji} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET} ({roll_info['roll']})\n"
+        
+        # Start with the base roll string.
+        roll_str = f"({roll_info['roll']})"
+        # If a tie-breaker roll exists, append it.
+        if 'tiebreaker_roll' in roll_info:
+            roll_str += f" (TIE BREAKER: {roll_info['tiebreaker_roll']})"
+            
+        roll_order_body += f"{num_emoji} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET} {roll_str}\n"
     roll_order_footer = "```"
     roll_order_section = roll_order_header + roll_order_body + roll_order_footer
 
@@ -342,7 +357,10 @@ class LootControlView(nextcord.ui.View):
         return False
 
     async def update_messages(self, interaction: nextcord.Interaction):
-        """Refreshes both messages after a state change or merges them if the session is over."""
+        """
+        Refreshes both messages after a state change, merges them if the session is over,
+        and sends a private notification to the current picker.
+        """
         session = loot_sessions.get(self.session_id)
         if not session: return
         
@@ -363,6 +381,8 @@ class LootControlView(nextcord.ui.View):
             except (nextcord.NotFound, nextcord.Forbidden):
                 pass
             loot_sessions.pop(self.session_id, None)
+            # Do not send a turn notification since the session is over.
+            return
 
         # --- Handle Normal Update ---
         else:
@@ -371,6 +391,25 @@ class LootControlView(nextcord.ui.View):
             self.update_components()
             await loot_list_msg.edit(content=loot_list_content)
             await control_panel_msg.edit(content=control_panel_content, view=self)
+
+        # --- NEW: Send Ephemeral Turn Notification ---
+        # After all public messages are updated, send a private message to the current picker.
+        # This message is only visible to them and will disappear automatically later.
+        is_active_turn = session["current_turn"] >= 0 and session["current_turn"] < len(session["rolls"])
+        
+        if is_active_turn:
+            picker = session["rolls"][session["current_turn"]]["member"]
+            notification_content = (
+                f"🔔 **It's your turn to pick, {picker.mention}!**\n"
+                "Use the dropdowns on the message above to make your selection."
+            )
+            try:
+                # Send the ephemeral (private) message. We don't need to track or delete it;
+                # a new one is sent each turn and Discord handles the old ones.
+                await interaction.followup.send(notification_content, ephemeral=True)
+            except nextcord.HTTPException:
+                # Failsafe in case the followup somehow fails. This prevents the bot from crashing.
+                pass
 
     async def on_timeout(self):
         """Handles the view timing out, merging messages into a final summary."""
@@ -545,9 +584,36 @@ class LootModal(nextcord.ui.Modal):
             await interaction.followup.send("❌ I could not find anyone in your voice channel. This is likely a permissions issue.", ephemeral=True)
             return
 
-        # Roll a 1-100 number for each member and sort them to create the turn order.
+        # --- Tie-Breaker Rolling Logic ---
+        # 1. Initial shuffle for fairness, then initial 1-100 roll for everyone.
+        random.shuffle(members_in_channel) # <-- ADD THIS LINE BACK
         rolls = [{"member": m, "roll": random.randint(1, 100)} for m in members_in_channel]
-        rolls.sort(key=lambda x: x['roll'], reverse=True)
+
+        # 2. Group members by their initial roll to find ties.
+        rolls.sort(key=lambda x: x['roll']) # Sort ascending to make grouping easier.
+        
+        processed_rolls = []
+        for roll_value, group in groupby(rolls, key=lambda x: x['roll']):
+            group_list = list(group)
+            # 3. If a group has more than one person, it's a tie.
+            if len(group_list) > 1:
+                # Create a tie-breaker roll list (e.g., [1, 2, 3] for 3 people).
+                tie_rolls = list(range(1, len(group_list) + 1))
+                random.shuffle(tie_rolls) # Shuffle to randomly assign the tie-breaker numbers.
+                for i, member_dict in enumerate(group_list):
+                    # Assign the unique tie-breaker roll to each person in the tied group.
+                    member_dict['tiebreaker_roll'] = tie_rolls[i]
+            processed_rolls.extend(group_list)
+
+        # 4. Final multi-level sort.
+        # First, sort by the tie-breaker roll (ascending, lower is better).
+        # The .get() provides a default, non-interfering value for non-tied members.
+        processed_rolls.sort(key=lambda x: x.get('tiebreaker_roll', 0))
+        # Finally, sort by the main roll (descending). Python's sort is stable,
+        # so the tie-breaker order we just established will be preserved.
+        processed_rolls.sort(key=lambda x: x['roll'], reverse=True)
+        
+        rolls = processed_rolls
         
         # Parse the input, handling the "Nx Item Name" syntax for stacked items.
         item_names = []
