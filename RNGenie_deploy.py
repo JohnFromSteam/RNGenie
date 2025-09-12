@@ -206,6 +206,8 @@ class LootControlView(nextcord.ui.View):
         self.session_id = session_id
         self.update_components()
 
+    # ... (no changes to _are_items_left, _advance_turn_snake, or update_components) ...
+
     def _are_items_left(self, session):
         """Checks if there are any unassigned items in the session."""
         return any(not item["assigned_to"] for item in session["items"])
@@ -222,7 +224,6 @@ class LootControlView(nextcord.ui.View):
         num_rollers = len(session["rolls"])
         if num_rollers == 0: return
 
-        # This handles the initial "Start" button press.
         if session["current_turn"] == -1:
             session["current_turn"] = 0
             return
@@ -232,7 +233,6 @@ class LootControlView(nextcord.ui.View):
         if 0 <= potential_next_turn < num_rollers:
             session["current_turn"] = potential_next_turn
         else:
-            # Reverse direction (the "snake" part of the draft).
             session["direction"] *= -1
             session["round"] += 1
             session["just_reversed"] = True
@@ -243,7 +243,6 @@ class LootControlView(nextcord.ui.View):
         self.clear_items()
         if not session or not self._are_items_left(session): return
 
-        # --- UI State 1: Pre-Loot (Participant Management) ---
         if session["current_turn"] == -1:
             selected_values = session.get("members_to_remove") or []
             member_options = []
@@ -272,7 +271,6 @@ class LootControlView(nextcord.ui.View):
                 label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="skip_button"
             ))
 
-        # --- UI State 2: Active Looting (Item Assignment) ---
         else:
             is_picking_turn = 0 <= session["current_turn"] < len(session["rolls"])
             if is_picking_turn:
@@ -306,11 +304,9 @@ class LootControlView(nextcord.ui.View):
             
             self.add_item(nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button"))
             
-            # NEW: Add the Undo button
             undo_disabled = not session.get("last_action")
             self.add_item(nextcord.ui.Button(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=undo_disabled))
         
-        # Dynamically assign callbacks to the newly created components.
         for child in self.children:
             if hasattr(child, 'custom_id'):
                 if child.custom_id == "assign_button": child.callback = self.on_assign
@@ -318,16 +314,14 @@ class LootControlView(nextcord.ui.View):
                 if "item_select" in child.custom_id: child.callback = self.on_item_select
                 if child.custom_id == "remove_select": child.callback = self.on_remove_select
                 if child.custom_id == "remove_confirm_button": child.callback = self.on_remove_confirm
-                if child.custom_id == "undo_button": child.callback = self.on_undo # NEW
+                if child.custom_id == "undo_button": child.callback = self.on_undo
 
     async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
-        """Checks if the interacting user is allowed to control the UI."""
         session = loot_sessions.get(self.session_id)
         if not session:
             await interaction.response.send_message("❌ This loot session has expired or could not be found.", ephemeral=True)
             return False
 
-        # NEW: Check for the Undo button first, as it has special permissions.
         if interaction.data.get("custom_id") == "undo_button":
             if interaction.user.id == session["invoker_id"]:
                 return True
@@ -335,7 +329,6 @@ class LootControlView(nextcord.ui.View):
                 await interaction.response.send_message("🛡️ Only the Loot Manager can use the Undo button.", ephemeral=True)
                 return False
 
-        # The invoker (Loot Master) and the person whose turn it is have control for other buttons.
         if interaction.user.id == session["invoker_id"]:
             return True
 
@@ -345,7 +338,6 @@ class LootControlView(nextcord.ui.View):
             if interaction.user.id == current_picker.id:
                 return True
         
-        # If unauthorized, send a helpful ephemeral message.
         invoker_mention = session["invoker"].mention
         if is_picking_turn:
             picker_mention = session["rolls"][session["current_turn"]]["member"].mention
@@ -357,10 +349,6 @@ class LootControlView(nextcord.ui.View):
         return False
 
     async def update_messages(self, interaction: nextcord.Interaction):
-        """
-        Refreshes both messages after a state change, merges them if the session is over,
-        and sends a private notification to the current picker.
-        """
         session = loot_sessions.get(self.session_id)
         if not session: return
         
@@ -372,7 +360,6 @@ class LootControlView(nextcord.ui.View):
             loot_sessions.pop(self.session_id, None)
             return
 
-        # --- Handle Session Completion ---
         if not self._are_items_left(session) and session["current_turn"] != -1:
             final_content = build_final_summary_message(session, timed_out=False)
             await control_panel_msg.edit(content=final_content, view=None)
@@ -381,10 +368,8 @@ class LootControlView(nextcord.ui.View):
             except (nextcord.NotFound, nextcord.Forbidden):
                 pass
             loot_sessions.pop(self.session_id, None)
-            # Do not send a turn notification since the session is over.
             return
 
-        # --- Handle Normal Update ---
         else:
             loot_list_content = build_loot_list_message(session)
             control_panel_content = build_control_panel_message(session)
@@ -392,9 +377,6 @@ class LootControlView(nextcord.ui.View):
             await loot_list_msg.edit(content=loot_list_content)
             await control_panel_msg.edit(content=control_panel_content, view=self)
 
-        # --- NEW: Send Ephemeral Turn Notification ---
-        # After all public messages are updated, send a private message to the current picker.
-        # This message is only visible to them and will disappear automatically later.
         is_active_turn = session["current_turn"] >= 0 and session["current_turn"] < len(session["rolls"])
         
         if is_active_turn:
@@ -404,15 +386,11 @@ class LootControlView(nextcord.ui.View):
                 "Use the dropdowns on the message above to make your selection."
             )
             try:
-                # Send the ephemeral (private) message. We don't need to track or delete it;
-                # a new one is sent each turn and Discord handles the old ones.
                 await interaction.followup.send(notification_content, ephemeral=True)
             except nextcord.HTTPException:
-                # Failsafe in case the followup somehow fails. This prevents the bot from crashing.
                 pass
 
     async def on_timeout(self):
-        """Handles the view timing out, merging messages into a final summary."""
         session = loot_sessions.get(self.session_id)
         if not session: return
         try:
@@ -432,7 +410,6 @@ class LootControlView(nextcord.ui.View):
             loot_sessions.pop(self.session_id, None)
 
     async def on_remove_select(self, interaction: nextcord.Interaction):
-        """Callback when the Loot Master selects users to remove."""
         session = loot_sessions.get(self.session_id)
         if not session: return
         session["members_to_remove"] = interaction.data["values"]
@@ -440,7 +417,7 @@ class LootControlView(nextcord.ui.View):
         await interaction.response.edit_message(view=self)
 
     async def on_remove_confirm(self, interaction: nextcord.Interaction):
-        """Callback for the 'Remove Selected' button."""
+        await interaction.response.defer() # <-- ADD THIS
         session = loot_sessions.get(self.session_id)
         if not session: return
         ids_to_remove = set(int(id_str) for id_str in session.get("members_to_remove", []))
@@ -450,7 +427,6 @@ class LootControlView(nextcord.ui.View):
         await self.update_messages(interaction)
 
     async def on_item_select(self, interaction: nextcord.Interaction):
-        """Callback when a user selects one or more items from any dropdown."""
         session = loot_sessions.get(self.session_id)
         if not session: return
         
@@ -471,14 +447,13 @@ class LootControlView(nextcord.ui.View):
         await interaction.response.edit_message(view=self)
 
     async def on_assign(self, interaction: nextcord.Interaction):
-        """Callback for the 'Assign Selected' button."""
+        await interaction.response.defer() # <-- ADD THIS
         session = loot_sessions.get(self.session_id)
         if not session: return
         
         selected_indices = session.get("selected_items")
         current_picker_id = session["rolls"][session["current_turn"]]["member"].id
         
-        # MODIFIED: Record the state BEFORE changing it.
         session["last_action"] = {
             "turn": session["current_turn"],
             "round": session["round"],
@@ -496,59 +471,51 @@ class LootControlView(nextcord.ui.View):
         await self.update_messages(interaction)
 
     async def on_skip(self, interaction: nextcord.Interaction):
-        """Callback for the 'Skip Turn' or 'Start Loot Assignment' button."""
+        await interaction.response.defer() # <-- ADD THIS
         session = loot_sessions.get(self.session_id)
         if not session: return
         
-        # MODIFIED: Record the state BEFORE changing it.
-        # Only record state if the session is active (not the initial "start" press).
         if session["current_turn"] != -1:
             session["last_action"] = {
                 "turn": session["current_turn"],
                 "round": session["round"],
                 "direction": session["direction"],
                 "just_reversed": session.get("just_reversed", False),
-                "assigned_indices": [] # A skip assigns no items.
+                "assigned_indices": []
             }
 
         session["selected_items"] = None
         if session["current_turn"] == -1:
             session["members_to_remove"] = None
-            session["last_action"] = None # No "last action" before the first turn.
+            session["last_action"] = None
             
         self._advance_turn_snake(session)
         await self.update_messages(interaction)
 
     async def on_undo(self, interaction: nextcord.Interaction):
-        """Callback for the 'Undo' button. Reverts the last assignment or skip."""
+        await interaction.response.defer() # <-- ADD THIS
         session = loot_sessions.get(self.session_id)
         if not session: return
 
         last_action = session.get("last_action")
         if not last_action:
-            # This should not happen if the button is disabled, but as a safeguard:
-            await interaction.response.send_message("❌ There is nothing to undo.", ephemeral=True)
+            await interaction.followup.send("❌ There is nothing to undo.", ephemeral=True)
             return
 
-        # Un-assign any items from the last action
         indices_to_unassign = last_action.get("assigned_indices", [])
         for index in indices_to_unassign:
-            # Check if the item still exists and is assigned to the correct person
             if index < len(session["items"]):
                 session["items"][index]["assigned_to"] = None
 
-        # Restore the previous turn state
         session["current_turn"] = last_action["turn"]
         session["round"] = last_action["round"]
         session["direction"] = last_action["direction"]
         session["just_reversed"] = last_action["just_reversed"]
         
-        # Clear the last action so you can't undo the same thing twice
         session["last_action"] = None
-        session["selected_items"] = None # Clear any selections
+        session["selected_items"] = None
         
         await self.update_messages(interaction)
-
 
 # ===================================================================================================
 # MODAL POP-UP FOR LOOT SETUP
