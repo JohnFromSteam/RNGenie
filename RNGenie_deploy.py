@@ -45,8 +45,8 @@ ANSI_USER = "\u001b[0;34m"
 # ===================================================================================================
 
 def build_loot_list_message(session):
-    """Builds the content for the first message (1/2), which lists remaining loot."""
-    header = "**(1/2)**\n"
+    """Builds the content for the first message (1/3), which lists remaining loot."""
+    header = "**(1/3)**\n"
     if any(not item["assigned_to"] for item in session["items"]):
         remaining_body = "\n".join(
             f"{item['display_number']}. {item['name']}"
@@ -63,9 +63,9 @@ def build_loot_list_message(session):
 
 
 def build_control_panel_message(session):
-    """Builds the content for the second message (2/2), the main info panel."""
+    """Builds the content for the second message (2/3), the main info panel."""
     invoker = session["invoker"]
-    header = f"**(2/2)**\n\n🎉 **Loot roll started by {invoker.mention}!**\n\n"
+    header = f"**(2/3)**\n\n🎉 **Loot roll started by {invoker.mention}!**\n\n"
 
     # --- Roll Order Section ---
     roll_order_body = "\n".join(
@@ -168,24 +168,21 @@ class LootControlView(nextcord.ui.View):
                 for r in session["rolls"] if r['member'].id != session["invoker_id"]
             ]
             if member_options:
-                self.add_item(self.RemoveSelect(member_options, row=0)) # Explicitly row 0
+                self.add_item(self.RemoveSelect(member_options, row=0))
             
-            self.add_item(self.RemoveConfirmButton(disabled=not session.get("members_to_remove"), row=1)) # Explicitly row 1
-            self.add_item(self.StartButton(row=1)) # Explicitly row 1
+            self.add_item(self.RemoveConfirmButton(disabled=not session.get("members_to_remove"), row=1))
+            self.add_item(self.StartButton(row=1))
             return
 
         # --- Active Looting Phase: Add item assignment components ---
         next_row = 0
         available_items = [(i, item) for i, item in enumerate(session["items"]) if not item["assigned_to"]]
         if available_items:
-            # Chunk items into groups of 25 for multiple dropdowns if necessary.
             for i, chunk in enumerate(available_items[i:i + 25] for i in range(0, len(available_items), 25)):
-                if chunk: # Failsafe to prevent creating a select menu with zero options.
-                    # Each dropdown gets its own sequential row.
+                if chunk:
                     self.add_item(self.ItemSelect(chunk, i, session.get("selected_items") or [], row=next_row))
                     next_row += 1
         
-        # All action buttons are placed together on the next available row.
         self.add_item(self.AssignButton(disabled=not session.get("selected_items"), row=next_row))
         self.add_item(self.SkipButton(row=next_row))
         self.add_item(self.UndoButton(disabled=not session.get("last_action"), row=next_row))
@@ -224,7 +221,7 @@ class LootControlView(nextcord.ui.View):
         async def callback(self, interaction: nextcord.Interaction):
             session = loot_sessions.get(self.view.session_id)
             session["members_to_remove"] = self.values
-            self.view._add_components() # Rebuild components to update button state.
+            self.view._add_components()
             await interaction.response.edit_message(view=self.view)
 
     class ItemSelect(nextcord.ui.Select):
@@ -253,7 +250,6 @@ class LootControlView(nextcord.ui.View):
             current_selection.update(self.values)
             session["selected_items"] = list(current_selection)
             
-            # Rebuild the view's components to reflect the new selection state.
             self.view._add_components()
             await interaction.response.edit_message(view=self.view)
 
@@ -471,8 +467,8 @@ class LootModal(nextcord.ui.Modal):
             return await interaction.followup.send("⚠️ You must enter at least one item.", ephemeral=True)
         
         # --- Message & Session Creation ---
-        loot_list_message = await interaction.followup.send("`Initializing Loot List (1/2)...`", wait=True)
-        control_panel_message = await interaction.channel.send("`Initializing Control Panel (2/2)...`")
+        loot_list_message = await interaction.followup.send("`Initializing Loot List (1/3)...`", wait=True)
+        control_panel_message = await interaction.channel.send("`Initializing Control Panel (2/3)...`")
         
         session_id = control_panel_message.id
         session = { 
