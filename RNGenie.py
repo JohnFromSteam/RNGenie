@@ -156,7 +156,7 @@ class LootControlView(nextcord.ui.View):
         self._add_components()
 
     def _add_components(self):
-        """Adds the necessary components for a loot turn."""
+        """Adds the necessary components for a loot turn, assigning explicit rows."""
         session = loot_sessions.get(self.session_id)
         if not session: return
         
@@ -168,22 +168,27 @@ class LootControlView(nextcord.ui.View):
                 for r in session["rolls"] if r['member'].id != session["invoker_id"]
             ]
             if member_options:
-                self.add_item(self.RemoveSelect(member_options))
+                self.add_item(self.RemoveSelect(member_options, row=0)) # Explicitly row 0
             
-            self.add_item(self.RemoveConfirmButton(disabled=not session.get("members_to_remove")))
-            self.add_item(self.StartButton())
+            self.add_item(self.RemoveConfirmButton(disabled=not session.get("members_to_remove"), row=1)) # Explicitly row 1
+            self.add_item(self.StartButton(row=1)) # Explicitly row 1
             return
 
         # --- Active Looting Phase: Add item assignment components ---
+        next_row = 0
         available_items = [(i, item) for i, item in enumerate(session["items"]) if not item["assigned_to"]]
         if available_items:
+            # Chunk items into groups of 25 for multiple dropdowns if necessary.
             for i, chunk in enumerate(available_items[i:i + 25] for i in range(0, len(available_items), 25)):
                 if chunk: # Failsafe to prevent creating a select menu with zero options.
-                    self.add_item(self.ItemSelect(chunk, i, session.get("selected_items") or []))
+                    # Each dropdown gets its own sequential row.
+                    self.add_item(self.ItemSelect(chunk, i, session.get("selected_items") or [], row=next_row))
+                    next_row += 1
         
-        self.add_item(self.AssignButton(disabled=not session.get("selected_items")))
-        self.add_item(self.SkipButton())
-        self.add_item(self.UndoButton(disabled=not session.get("last_action")))
+        # All action buttons are placed together on the next available row.
+        self.add_item(self.AssignButton(disabled=not session.get("selected_items"), row=next_row))
+        self.add_item(self.SkipButton(row=next_row))
+        self.add_item(self.UndoButton(disabled=not session.get("last_action"), row=next_row))
 
     async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
         """Checks if the interacting user is allowed to control the UI."""
@@ -214,8 +219,8 @@ class LootControlView(nextcord.ui.View):
     # --- Component Classes and Callbacks ---
 
     class RemoveSelect(nextcord.ui.Select):
-        def __init__(self, options):
-            super().__init__(placeholder="Select participants to remove...", options=options, custom_id="remove_select", min_values=0, max_values=len(options))
+        def __init__(self, options, row=0):
+            super().__init__(placeholder="Select participants to remove...", options=options, custom_id="remove_select", min_values=0, max_values=len(options), row=row)
         async def callback(self, interaction: nextcord.Interaction):
             session = loot_sessions.get(self.view.session_id)
             session["members_to_remove"] = self.values
@@ -223,7 +228,7 @@ class LootControlView(nextcord.ui.View):
             await interaction.response.edit_message(view=self.view)
 
     class ItemSelect(nextcord.ui.Select):
-        def __init__(self, chunk, chunk_index, selected_values):
+        def __init__(self, chunk, chunk_index, selected_values, row=0):
             options = [
                 nextcord.SelectOption(
                     label=(f"{item['display_number']}. {item['name']}"[:97] + '...') if len(f"{item['display_number']}. {item['name']}") > 100 else f"{item['display_number']}. {item['name']}",
@@ -234,7 +239,7 @@ class LootControlView(nextcord.ui.View):
             if len(options) > 1 and (chunk[0][1]['display_number'] != chunk[-1][1]['display_number']):
                 placeholder = f"Choose items ({chunk[0][1]['display_number']}-{chunk[-1][1]['display_number']})..."
             
-            super().__init__(placeholder=placeholder, options=options, custom_id=f"item_select_{chunk_index}", min_values=0, max_values=len(options), row=0)
+            super().__init__(placeholder=placeholder, options=options, custom_id=f"item_select_{chunk_index}", min_values=0, max_values=len(options), row=row)
         
         async def callback(self, interaction: nextcord.Interaction):
             session = loot_sessions.get(self.view.session_id)
@@ -253,8 +258,8 @@ class LootControlView(nextcord.ui.View):
             await interaction.response.edit_message(view=self.view)
 
     class RemoveConfirmButton(nextcord.ui.Button):
-        def __init__(self, disabled):
-            super().__init__(label="Remove Selected", style=nextcord.ButtonStyle.danger, emoji="✖️", custom_id="remove_confirm_button", disabled=disabled)
+        def __init__(self, disabled, row=0):
+            super().__init__(label="Remove Selected", style=nextcord.ButtonStyle.danger, emoji="✖️", custom_id="remove_confirm_button", disabled=disabled, row=row)
         async def callback(self, interaction: nextcord.Interaction):
             await interaction.response.defer()
             session = loot_sessions.get(self.view.session_id)
@@ -265,8 +270,8 @@ class LootControlView(nextcord.ui.View):
             await _update_all_messages(self.view.session_id, interaction)
 
     class AssignButton(nextcord.ui.Button):
-        def __init__(self, disabled):
-            super().__init__(label="Assign Selected", style=nextcord.ButtonStyle.green, emoji="✅", custom_id="assign_button", disabled=disabled, row=1)
+        def __init__(self, disabled, row=0):
+            super().__init__(label="Assign Selected", style=nextcord.ButtonStyle.green, emoji="✅", custom_id="assign_button", disabled=disabled, row=row)
         async def callback(self, interaction: nextcord.Interaction):
             await interaction.response.defer()
             session = loot_sessions.get(self.view.session_id)
@@ -287,8 +292,8 @@ class LootControlView(nextcord.ui.View):
             await _update_all_messages(self.view.session_id, interaction)
 
     class StartButton(nextcord.ui.Button):
-        def __init__(self):
-            super().__init__(label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="start_button")
+        def __init__(self, row=0):
+            super().__init__(label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="start_button", row=row)
         async def callback(self, interaction: nextcord.Interaction):
             await interaction.response.defer()
             session = loot_sessions.get(self.view.session_id)
@@ -296,8 +301,8 @@ class LootControlView(nextcord.ui.View):
             await _update_all_messages(self.view.session_id, interaction)
 
     class SkipButton(nextcord.ui.Button):
-        def __init__(self):
-            super().__init__(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button", row=1)
+        def __init__(self, row=0):
+            super().__init__(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button", row=row)
         async def callback(self, interaction: nextcord.Interaction):
             await interaction.response.defer()
             session = loot_sessions.get(self.view.session_id)
@@ -310,8 +315,8 @@ class LootControlView(nextcord.ui.View):
             await _update_all_messages(self.view.session_id, interaction)
 
     class UndoButton(nextcord.ui.Button):
-        def __init__(self, disabled):
-            super().__init__(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=disabled, row=1)
+        def __init__(self, disabled, row=0):
+            super().__init__(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=disabled, row=row)
         async def callback(self, interaction: nextcord.Interaction):
             await interaction.response.defer()
             session = loot_sessions.get(self.view.session_id)
