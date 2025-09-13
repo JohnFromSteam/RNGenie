@@ -212,58 +212,41 @@ class ItemDropdownView(nextcord.ui.View):
         self.session_id = session_id
         self.populate()
 
-    def populate(self):
-        self.clear_items()
-        session = loot_sessions.get(self.session_id)
-        if not session: return
+def populate(self):
+    self.clear_items()
+    session = loot_sessions.get(self.session_id)
+    if not session:
+        return
 
-        # If no items left, nothing to add
-        if not _are_items_left(session):
-            return
+    # Pre-start: manage participants
+    if session["current_turn"] == -1:
+        selected_values = session.get("members_to_remove") or []
+        member_options = []
+        invoker_id = session["invoker_id"]
+        for r in session["rolls"]:
+            if r["member"].id != invoker_id:
+                is_selected = str(r['member'].id) in selected_values
+                member_options.append(nextcord.SelectOption(label=r['member'].display_name, value=str(r['member'].id), default=is_selected))
+        if member_options:
+            self.add_item(nextcord.ui.Select(placeholder="Select participants to remove...", options=member_options, custom_id="remove_select", min_values=0, max_values=len(member_options)))
+        remove_disabled = not session.get("members_to_remove")
+        self.add_item(nextcord.ui.Button(label="Remove Selected", style=nextcord.ButtonStyle.danger, emoji="✖️", custom_id="remove_confirm_button", disabled=remove_disabled))
+        self.add_item(nextcord.ui.Button(label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="start_button"))
 
-        # Only add selects when it's a picker's active turn
-        if 0 <= session["current_turn"] < len(session["rolls"]):
-            available_items = [(idx, it) for idx, it in enumerate(session["items"]) if not it["assigned_to"]]
-            if not available_items:
-                return
+    else:
+        pass
 
-            item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
-            selected_values = set(session.get("selected_items") or [])
-            for i, chunk in enumerate(item_chunks):
-                options = []
-                for orig_index, item_dict in chunk:
-                    label_text = f"{item_dict['display_number']}. {item_dict['name']}"
-                    truncated_label = (label_text[:97] + '...') if len(label_text) > 100 else label_text
-                    is_selected = str(orig_index) in selected_values
-                    options.append(nextcord.SelectOption(label=truncated_label, value=str(orig_index), default=is_selected))
-                placeholder = "Choose one or more items to claim..."
-                if len(item_chunks) > 1:
-                    start_num, end_num = chunk[0][1]['display_number'], chunk[-1][1]['display_number']
-                    placeholder = f"Choose items ({start_num}-{end_num})..."
-                self.add_item(nextcord.ui.Select(placeholder=placeholder, options=options, custom_id=f"item_select_{i}", min_values=0, max_values=len(options)))
-
-            assign_disabled = not session.get("selected_items")
-            self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.green, emoji="✅", custom_id="assign_button", disabled=assign_disabled))
-
-        # Skip Turn is shown regardless (keeps parity with your template)
-        self.add_item(nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button"))
-
-        # Add Undo next to Skip Turn: only enabled when there's something to undo.
-        # Permission enforcement happens in the on_undo handler (only invoker allowed).
-        undo_disabled = not session.get("last_action")
-        self.add_item(nextcord.ui.Button(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=undo_disabled))
-
-        # assign callbacks
-        for child in self.children:
-            if hasattr(child, "custom_id"):
-                if child.custom_id == "assign_button":
-                    child.callback = self.on_assign
-                if child.custom_id == "skip_button":
-                    child.callback = self.on_skip
-                if child.custom_id == "undo_button":
-                    child.callback = self.on_undo
-                if hasattr(child, "options") and "item_select" in child.custom_id:
-                    child.callback = self.on_item_select
+    # attach callbacks
+    for child in self.children:
+        if hasattr(child, "custom_id"):
+            if child.custom_id == "remove_select":
+                child.callback = self.on_remove_select
+            if child.custom_id == "remove_confirm_button":
+                child.callback = self.on_remove_confirm
+            if child.custom_id == "start_button":
+                child.callback = self.on_start
+            if child.custom_id == "undo_button":
+                child.callback = self.on_undo
 
     async def on_item_select(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
@@ -622,7 +605,7 @@ class LootModal(nextcord.ui.Modal):
         super().__init__("RNGenie Loot Manager")
         self.loot_items = nextcord.ui.TextInput(
             label="List Items Below (One Per Line) Then Submit",
-            placeholder="Type your items here\nEach line is considered an item",
+            placeholder="Type your items here\nExample: 2x Health Potion",
             required=True,
             style=nextcord.TextInputStyle.paragraph,
             max_length=2000
