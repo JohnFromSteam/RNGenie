@@ -29,10 +29,8 @@ SESSION_TIMEOUT_SECONDS = 1800  # 30 minutes
 
 # Emojis for numbering lists in the Discord message for a clean UI.
 NUMBER_EMOJIS = {
-    1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣",
-    6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟",
-    11: "1️⃣1️⃣", 12: "1️⃣2️⃣", 13: "1️⃣3️⃣", 14: "1️⃣4️⃣", 15: "1️⃣5️⃣",
-    16: "1️⃣6️⃣", 17: "1️⃣7️⃣", 18: "1️⃣8️⃣", 19: "1️⃣9️⃣", 20: "2️⃣0️⃣"
+    1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟",
+    11: "1️⃣1️⃣", 12: "1️⃣2️⃣", 13: "1️⃣3️⃣", 14: "1️⃣4️⃣", 15: "1️⃣5️⃣", 16: "1️⃣6️⃣", 17: "1️⃣7️⃣", 18: "1️⃣8️⃣", 19: "1️⃣9️⃣", 20: "2️⃣0️⃣"
 }
 
 # ANSI color codes for formatting the text blocks in Discord messages.
@@ -46,309 +44,198 @@ ANSI_USER = "\u001b[0;34m"
 # ===================================================================================================
 
 def build_loot_list_message(session):
-    """Builds the content for the first message (1/2), which only lists remaining loot."""
+    """Builds the content for the first message (1/2), which lists remaining loot."""
     header = "**(1/2)**\n"
-    remaining_items = [item for item in session["items"] if not item["assigned_to"]]
-    
-    if remaining_items:
-        header_text = "❌ Remaining Loot Items ❌"
-        remaining_header = f"```ansi\n{ANSI_HEADER}{header_text}{ANSI_RESET}\n==================================\n"
-        remaining_body = ""
-        for item in session["items"]:
-            if not item["assigned_to"]:
-                remaining_body += f"{item['display_number']}. {item['name']}\n"
-        remaining_footer = "```"
-        return f"{header}{remaining_header}{remaining_body}{remaining_footer}"
-    
-    # This state should rarely be seen, as the message is deleted upon completion,
-    # but serves as a fallback.
-    return f"{header}```ansi\n{ANSI_HEADER}✅ All Items Assigned ✅{ANSI_RESET}\n==================================\nAll items have been distributed.\n==================================\n```"
+    if any(not item["assigned_to"] for item in session["items"]):
+        remaining_body = "\n".join(
+            f"{item['display_number']}. {item['name']}"
+            for item in session["items"] if not item["assigned_to"]
+        )
+        return (
+            f"{header}```ansi\n{ANSI_HEADER}❌ Remaining Loot Items ❌{ANSI_RESET}\n"
+            f"==================================\n{remaining_body}\n```"
+        )
+    # Fallback message for when all items are gone.
+    return (
+        f"{header}```ansi\n{ANSI_HEADER}✅ All Items Assigned ✅{ANSI_RESET}\n"
+        f"==================================\nAll items have been distributed.\n```"
+    )
+
 
 def build_control_panel_message(session):
     """Builds the content for the second message (2/2), the main control panel."""
     invoker = session["invoker"]
     rolls = session["rolls"]
-
     header = f"**(2/2)**\n\n🎉 **Loot roll started by {invoker.mention}!**\n\n"
 
-    # --- Part 1: Roll Order ---
-    roll_order_header = f"```ansi\n{ANSI_HEADER}🔢 Roll Order 🔢{ANSI_RESET}\n==================================\n"
+    # --- Roll Order Section ---
     roll_order_body = ""
-    for i, roll_info in enumerate(rolls):
-        num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        
-        # Start with the base roll string.
+    for i, roll_info in enumerate(rolls, 1):
         roll_str = f"({roll_info['roll']})"
-        # If a tie-breaker roll exists, append it.
         if 'tiebreaker_roll' in roll_info:
             roll_str += f" (TIE BREAKER: {roll_info['tiebreaker_roll']})"
-            
-        roll_order_body += f"{num_emoji} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET} {roll_str}\n"
-    roll_order_footer = "```"
-    roll_order_section = roll_order_header + roll_order_body + roll_order_footer
+        roll_order_body += f"{NUMBER_EMOJIS.get(i, f'#{i}')} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET} {roll_str}\n"
+    
+    roll_order_section = (
+        f"```ansi\n{ANSI_HEADER}🔢 Roll Order 🔢{ANSI_RESET}\n==================================\n{roll_order_body}```"
+    )
 
-    # --- Part 2: Assigned Items (MODIFIED) ---
-    assigned_items_header = f"```ansi\n{ANSI_HEADER}✅ Assigned Items ✅{ANSI_RESET}\n==================================\n"
+    # --- Assigned Items Section ---
     assigned_items_body = ""
     assigned_items_map = {roll_info["member"].id: [] for roll_info in rolls}
     for item in session["items"]:
         if item["assigned_to"]:
             assigned_items_map[item["assigned_to"]].append(item["name"])
 
-    # This loop no longer contains the "===" separator.
-    for i, roll_info in enumerate(rolls):
-        member = roll_info["member"]
-        num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        # Add a newline for spacing between users, but not before the first one.
-        if i > 0:
-            assigned_items_body += "\n"
-        assigned_items_body += f"{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n"
-        if assigned_items_map[member.id]:
-            for item_name in assigned_items_map[member.id]:
-                assigned_items_body += f"- {item_name}\n"
-    
-    assigned_items_footer = "```"
-    assigned_items_section = assigned_items_header + assigned_items_body + assigned_items_footer
+    for i, roll_info in enumerate(rolls, 1):
+        if i > 1: assigned_items_body += "\n"
+        assigned_items_body += f"{NUMBER_EMOJIS.get(i, f'#{i}')} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET}\n"
+        if assigned_items_map[roll_info["member"].id]:
+            assigned_items_body += "".join(f"   - {name}\n" for name in assigned_items_map[roll_info["member"].id])
+        
+    assigned_items_section = (
+        f"```ansi\n{ANSI_HEADER}✅ Assigned Items ✅{ANSI_RESET}\n==================================\n{assigned_items_body}```"
+    )
 
-    # --- Part 3: Footer (Turn Indicator) ---
+    # --- Footer (Turn Indicator) ---
     footer = ""
     if session["current_turn"] >= 0:
         picker = session["rolls"][session["current_turn"]]["member"]
-        direction_text = "Normal Order" if session["direction"] == 1 else "Reverse Order"
-        picker_emoji = NUMBER_EMOJIS.get(session['current_turn'] + 1, "👉")
-        turn_text = "turn again!" if session.get("just_reversed", False) else "turn!"
+        direction = "Normal Order" if session["direction"] == 1 else "Reverse Order"
+        turn_text = "turn again!" if session.get("just_reversed") else "turn!"
         footer = (
-            f"🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
-            f"**{picker_emoji} It is {picker.mention}'s {turn_text} **\n\n"
-            f"✍️ **Loot Manager {invoker.mention}\nor {picker.mention} must select items or skip.**"
+            f"🔔 **Round {session['round'] + 1}** ({direction})\n\n"
+            f"**{NUMBER_EMOJIS.get(session['current_turn'] + 1, '👉')} It is {picker.mention}'s {turn_text} **\n\n"
+            f"✍️ **{picker.mention} or {invoker.mention} must select items or skip.**"
         )
     else:
-        footer = f"🎁 **Loot distribution is ready!**\n\n✍️ **Loot Manager {invoker.mention} can remove participants or click below to begin.**"
+        footer = f"🎁 **Loot distribution is ready!**\n\n✍️ **{invoker.mention} can remove participants or click below to begin.**"
 
     return f"{header}{roll_order_section}\n{assigned_items_section}\n{footer}"
 
+
 def build_final_summary_message(session, timed_out=False):
     """Builds the single, merged message shown when the session ends."""
-    rolls = session["rolls"]
+    header = "⌛ **The loot session has timed out!**\n\n" if timed_out else "✅ **All items have been assigned!**\n\n"
 
-    # --- Part 1: Final Header ---
-    if timed_out:
-        header = "⌛ **The loot session has timed out! Here is the final summary:**\n\n"
-    else:
-        header = "✅ **All items have been assigned! Here is the final summary:**\n\n"
-
-    # --- Part 2: Roll Order (same as control panel) ---
-    roll_order_header = f"```ansi\n{ANSI_HEADER}🔢 Final Roll Order 🔢{ANSI_RESET}\n==================================\n"
+    # --- Final Roll Order Section ---
     roll_order_body = ""
-    for i, roll_info in enumerate(rolls):
-        num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        
-        # Start with the base roll string.
+    for i, roll_info in enumerate(session["rolls"], 1):
         roll_str = f"({roll_info['roll']})"
-        # If a tie-breaker roll exists, append it.
         if 'tiebreaker_roll' in roll_info:
             roll_str += f" (TIE BREAKER: {roll_info['tiebreaker_roll']})"
-            
-        roll_order_body += f"{num_emoji} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET} {roll_str}\n"
-    roll_order_footer = "```"
-    roll_order_section = roll_order_header + roll_order_body + roll_order_footer
+        roll_order_body += f"{NUMBER_EMOJIS.get(i, f'#{i}')} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET} {roll_str}\n"
+        
+    roll_order_section = (
+        f"```ansi\n{ANSI_HEADER}🔢 Final Roll Order 🔢{ANSI_RESET}\n==================================\n{roll_order_body}```"
+    )
 
-    # --- Part 3: Final Assigned Items (MODIFIED) ---
-    assigned_items_header = f"```ansi\n{ANSI_HEADER}✅ Final Assigned Items ✅{ANSI_RESET}\n==================================\n"
+    # --- Final Assigned Items Section ---
     assigned_items_body = ""
-    assigned_items_map = {roll_info["member"].id: [] for roll_info in rolls}
+    assigned_items_map = {roll_info["member"].id: [] for roll_info in session["rolls"]}
     for item in session["items"]:
         if item["assigned_to"]:
             assigned_items_map[item["assigned_to"]].append(item["name"])
 
-    # This loop no longer contains the "===" separator.
-    for i, roll_info in enumerate(rolls):
-        member = roll_info["member"]
-        num_emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        # Add a newline for spacing between users, but not before the first one.
-        if i > 0:
-            assigned_items_body += "\n"
-        assigned_items_body += f"{num_emoji} {ANSI_USER}{member.display_name}{ANSI_RESET}\n"
-        if assigned_items_map[member.id]:
-            for item_name in assigned_items_map[member.id]:
-                assigned_items_body += f"- {item_name}\n"
+    for i, roll_info in enumerate(session["rolls"], 1):
+        if i > 1: assigned_items_body += "\n"
+        assigned_items_body += f"{NUMBER_EMOJIS.get(i, f'#{i}')} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET}\n"
+        if assigned_items_map[roll_info["member"].id]:
+            assigned_items_body += "".join(f"   - {name}\n" for name in assigned_items_map[roll_info["member"].id])
         else:
-            assigned_items_body += "- N/A\n"
+            assigned_items_body += "   - N/A\n"
             
-    assigned_items_footer = "```"
-    assigned_items_section = assigned_items_header + assigned_items_body + assigned_items_footer
+    assigned_items_section = (
+        f"```ansi\n{ANSI_HEADER}✅ Final Assigned Items ✅{ANSI_RESET}\n==================================\n{assigned_items_body}```"
+    )
     
-    # --- Part 4: Unclaimed Items (the merged part) ---
+    # --- Unclaimed Items Section ---
     unclaimed_section = ""
     unclaimed_items = [item for item in session["items"] if not item["assigned_to"]]
     if unclaimed_items:
-        unclaimed_header = f"```ansi\n{ANSI_HEADER}❌ Unclaimed Items ❌{ANSI_RESET}\n==================================\n"
-        unclaimed_body = ""
-        for item in unclaimed_items:
-            unclaimed_body += f"{item['display_number']}. {item['name']}\n"
-        unclaimed_footer = "```"
-        unclaimed_section = unclaimed_header + unclaimed_body + unclaimed_footer
+        unclaimed_body = "\n".join(f"{item['display_number']}. {item['name']}" for item in unclaimed_items)
+        unclaimed_section = (
+            f"```ansi\n{ANSI_HEADER}❌ Unclaimed Items ❌{ANSI_RESET}\n==================================\n{unclaimed_body}\n```"
+        )
 
     return f"{header}{roll_order_section}\n{assigned_items_section}\n{unclaimed_section}"
 
 
 # ===================================================================================================
-# DYNAMIC UI VIEW (BUTTONS & DROPDOWNS)
+# DYNAMIC UI VIEW
 # ===================================================================================================
 
 class LootControlView(nextcord.ui.View):
     """
-    Manages the interactive components (buttons, dropdowns) for a loot session.
-    It handles user interactions, updates the session state, and refreshes the messages.
+    Manages the interactive components for a loot session using UI Kit decorators.
     """
     def __init__(self, session_id):
         super().__init__(timeout=SESSION_TIMEOUT_SECONDS)
         self.session_id = session_id
-        self.update_components()
+        self.update_dynamic_components()
 
-    # ... (no changes to _are_items_left, _advance_turn_snake, or update_components) ...
-
-    def _are_items_left(self, session):
-        """Checks if there are any unassigned items in the session."""
-        return any(not item["assigned_to"] for item in session["items"])
-
-    def _advance_turn_snake(self, session):
-        """
-        Calculates the next turn in a "snake draft" order (1->N, N->1).
-        """
-        session["just_reversed"] = False
-        if not self._are_items_left(session):
-            session["current_turn"] = len(session["rolls"]) # Signal to end the session.
-            return
-
-        num_rollers = len(session["rolls"])
-        if num_rollers == 0: return
-
-        if session["current_turn"] == -1:
-            session["current_turn"] = 0
-            return
-
-        potential_next_turn = session["current_turn"] + session["direction"]
-        
-        if 0 <= potential_next_turn < num_rollers:
-            session["current_turn"] = potential_next_turn
-        else:
-            session["direction"] *= -1
-            session["round"] += 1
-            session["just_reversed"] = True
-
-    def update_components(self):
-        """Re-generates UI components based on the current session state."""
+    def update_dynamic_components(self):
+        """Adds the correct UI components to the view based on the session's state."""
         session = loot_sessions.get(self.session_id)
         self.clear_items()
-        if not session or not self._are_items_left(session): return
+        if not session or not any(not item["assigned_to"] for item in session["items"]): return
 
         if session["current_turn"] == -1:
-            selected_values = session.get("members_to_remove") or []
-            member_options = []
-            invoker_id = session["invoker_id"]
-            
-            for roll_info in session["rolls"]:
-                if roll_info['member'].id != invoker_id:
-                    is_selected = str(roll_info['member'].id) in selected_values
-                    member_options.append(nextcord.SelectOption(
-                        label=roll_info['member'].display_name, value=str(roll_info['member'].id), default=is_selected
-                    ))
-
+            # --- Pre-Loot Phase: Add participant management components ---
+            member_options = [
+                nextcord.SelectOption(label=r['member'].display_name, value=str(r['member'].id),
+                                      default=str(r['member'].id) in (session.get("members_to_remove") or []))
+                for r in session["rolls"] if r['member'].id != session["invoker_id"]
+            ]
             if member_options:
-                self.add_item(nextcord.ui.Select(
-                    placeholder="Select participants to remove...", options=member_options,
-                    custom_id="remove_select", min_values=0, max_values=len(member_options)
-                ))
+                self.add_item(self.RemoveSelect(member_options))
             
-            remove_button_disabled = not session.get("members_to_remove")
-            self.add_item(nextcord.ui.Button(
-                label="Remove Selected", style=nextcord.ButtonStyle.danger, emoji="✖️",
-                custom_id="remove_confirm_button", disabled=remove_button_disabled
-            ))
-            
-            self.add_item(nextcord.ui.Button(
-                label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="skip_button"
-            ))
-
+            self.add_item(self.RemoveConfirmButton(disabled=not session.get("members_to_remove")))
+            self.add_item(self.StartButton())
         else:
-            is_picking_turn = 0 <= session["current_turn"] < len(session["rolls"])
-            if is_picking_turn:
-                available_items = [(index, item) for index, item in enumerate(session["items"]) if not item["assigned_to"]]
-                
-                if available_items:
-                    item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
-                    for i, chunk in enumerate(item_chunks):
-                        options = []
-                        selected_values = session.get("selected_items") or []
-                        for original_index, item_dict in chunk:
-                            is_selected = str(original_index) in selected_values
-                            label_text = f"{item_dict['display_number']}. {item_dict['name']}"
-                            truncated_label = (label_text[:97] + '...') if len(label_text) > 100 else label_text
-                            options.append(nextcord.SelectOption(
-                                label=truncated_label, value=str(original_index), default=is_selected
-                            ))
-                        
-                        placeholder = "Choose one or more items to claim..."
-                        if len(item_chunks) > 1:
-                            start_num, end_num = chunk[0][1]['display_number'], chunk[-1][1]['display_number']
-                            placeholder = f"Choose items ({start_num}-{end_num})..."
-
-                        self.add_item(nextcord.ui.Select(
-                            placeholder=placeholder, options=options, custom_id=f"item_select_{i}", 
-                            min_values=0, max_values=len(options)
-                        ))
-                
-                assign_button_disabled = not session.get("selected_items")
-                self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.green, emoji="✅", custom_id="assign_button", disabled=assign_button_disabled))
+            # --- Active Looting Phase: Add item assignment components ---
+            available_items = [(i, item) for i, item in enumerate(session["items"]) if not item["assigned_to"]]
+            if available_items:
+                # Chunk items into groups of 25 for multiple dropdowns if necessary.
+                for i, chunk in enumerate(available_items[i:i + 25] for i in range(0, len(available_items), 25)):
+                    self.add_item(self.ItemSelect(chunk, i, session.get("selected_items") or []))
             
-            self.add_item(nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button"))
-            
-            undo_disabled = not session.get("last_action")
-            self.add_item(nextcord.ui.Button(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=undo_disabled))
-        
-        for child in self.children:
-            if hasattr(child, 'custom_id'):
-                if child.custom_id == "assign_button": child.callback = self.on_assign
-                if child.custom_id == "skip_button": child.callback = self.on_skip
-                if "item_select" in child.custom_id: child.callback = self.on_item_select
-                if child.custom_id == "remove_select": child.callback = self.on_remove_select
-                if child.custom_id == "remove_confirm_button": child.callback = self.on_remove_confirm
-                if child.custom_id == "undo_button": child.callback = self.on_undo
+            self.add_item(self.AssignButton(disabled=not session.get("selected_items")))
+            self.add_item(self.SkipButton())
+            self.add_item(self.UndoButton(disabled=not session.get("last_action")))
 
     async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
+        """Checks if the interacting user is allowed to control the UI."""
         session = loot_sessions.get(self.session_id)
         if not session:
             await interaction.response.send_message("❌ This loot session has expired or could not be found.", ephemeral=True)
             return False
 
-        if interaction.data.get("custom_id") == "undo_button":
-            if interaction.user.id == session["invoker_id"]:
-                return True
-            else:
-                await interaction.response.send_message("🛡️ Only the Loot Manager can use the Undo button.", ephemeral=True)
-                return False
-
+        # The Loot Manager has universal control.
         if interaction.user.id == session["invoker_id"]:
             return True
+            
+        # The Undo button is exclusively for the Loot Manager.
+        if interaction.data.get("custom_id") == "undo_button":
+            await interaction.response.send_message("🛡️ Only the Loot Manager can use the Undo button.", ephemeral=True)
+            return False
 
+        # The current picker also has control during their turn.
         is_picking_turn = 0 <= session["current_turn"] < len(session["rolls"])
-        if is_picking_turn:
-            current_picker = session["rolls"][session["current_turn"]]["member"]
-            if interaction.user.id == current_picker.id:
-                return True
+        if is_picking_turn and interaction.user.id == session["rolls"][session["current_turn"]]["member"].id:
+            return True
         
-        invoker_mention = session["invoker"].mention
+        # If none of the above, deny permission with a helpful message.
         if is_picking_turn:
             picker_mention = session["rolls"][session["current_turn"]]["member"].mention
-            error_message = f"🛡️ It's not your turn! Only {invoker_mention} or {picker_mention} can interact."
+            error_message = f"🛡️ It's not your turn! Only {session['invoker'].mention} or {picker_mention} can interact."
         else:
-            error_message = f"🛡️ Only {invoker_mention} can manage participants or start the assignment."
-        
+            error_message = f"🛡️ Only {session['invoker'].mention} can manage participants or start the assignment."
         await interaction.response.send_message(error_message, ephemeral=True)
         return False
 
-    async def update_messages(self, interaction: nextcord.Interaction):
+    async def _update_all_messages(self, interaction: nextcord.Interaction):
+        """Central hub for refreshing messages, handling session completion, and sending notifications."""
         session = loot_sessions.get(self.session_id)
         if not session: return
         
@@ -357,52 +244,37 @@ class LootControlView(nextcord.ui.View):
             loot_list_msg = await channel.fetch_message(session["loot_list_message_id"])
             control_panel_msg = await channel.fetch_message(self.session_id)
         except (nextcord.NotFound, nextcord.Forbidden):
-            loot_sessions.pop(self.session_id, None)
-            return
+            return loot_sessions.pop(self.session_id, None)
 
         # --- Handle Session Completion ---
-        if not self._are_items_left(session) and session["current_turn"] != -1:
+        if not any(not item["assigned_to"] for item in session["items"]) and session["current_turn"] != -1:
             final_content = build_final_summary_message(session, timed_out=False)
             await control_panel_msg.edit(content=final_content, view=None)
-            try:
-                await loot_list_msg.delete()
-            except (nextcord.NotFound, nextcord.Forbidden):
-                pass
-            loot_sessions.pop(self.session_id, None)
-            return
+            try: await loot_list_msg.delete()
+            except (nextcord.NotFound, nextcord.Forbidden): pass
+            return loot_sessions.pop(self.session_id, None)
 
         # --- Handle Normal Update ---
-        else:
-            loot_list_content = build_loot_list_message(session)
-            control_panel_content = build_control_panel_message(session)
-            self.update_components()
-            await loot_list_msg.edit(content=loot_list_content)
-            await control_panel_msg.edit(content=control_panel_content, view=self)
+        self.update_dynamic_components()
+        await loot_list_msg.edit(content=build_loot_list_message(session))
+        await control_panel_msg.edit(content=build_control_panel_message(session), view=self)
 
-        # --- Send Direct Message Notification ---
-        is_active_turn = session["current_turn"] >= 0 and session["current_turn"] < len(session["rolls"])
-        
+        # --- Send DM Notification ---
+        is_active_turn = 0 <= session["current_turn"] < len(session["rolls"])
         if is_active_turn:
             picker = session["rolls"][session["current_turn"]]["member"]
-            # Create a link to the control panel message for easy navigation.
-            jump_url = control_panel_msg.jump_url
             notification_content = (
                 f"🔔 **It's your turn to pick in the loot session!**\n\n"
-                f"Click here to jump back to the channel: {jump_url}\n\n"
+                f"Click here to jump back to the channel: {control_panel_msg.jump_url}\n\n"
                 "*This message will self-destruct in 30 seconds.*"
             )
             try:
-                # Send the Direct Message with a 30-second self-destruct timer.
                 await picker.send(notification_content, delete_after=30.0)
-            except nextcord.Forbidden:
-                # This happens if the user has DMs disabled for server members.
-                # We can log it to the console for the bot owner to see.
-                print(f"Could not send DM to {picker.display_name}. They may have DMs disabled.")
-            except nextcord.HTTPException as e:
-                # Handle other potential Discord API errors.
-                print(f"Failed to send DM notification: {e}")
+            except (nextcord.Forbidden, nextcord.HTTPException) as e:
+                print(f"Could not send DM to {picker.display_name}. Reason: {e}")
             
     async def on_timeout(self):
+        """Handles the view timing out by posting a final summary."""
         session = loot_sessions.get(self.session_id)
         if not session: return
         try:
@@ -412,122 +284,137 @@ class LootControlView(nextcord.ui.View):
                 control_panel_msg = await channel.fetch_message(self.session_id)
                 final_summary = build_final_summary_message(session, timed_out=True)
                 await control_panel_msg.edit(content=final_summary, view=None)
-                try:
-                    await loot_list_msg.delete()
-                except (nextcord.NotFound, nextcord.Forbidden):
-                    pass
-        except (nextcord.NotFound, nextcord.Forbidden):
-            pass
+                try: await loot_list_msg.delete()
+                except (nextcord.NotFound, nextcord.Forbidden): pass
+        except (nextcord.NotFound, nextcord.Forbidden): pass
         finally:
             loot_sessions.pop(self.session_id, None)
 
-    async def on_remove_select(self, interaction: nextcord.Interaction):
-        session = loot_sessions.get(self.session_id)
-        if not session: return
-        session["members_to_remove"] = interaction.data["values"]
-        self.update_components()
-        await interaction.response.edit_message(view=self)
+    # --- Component Callbacks defined with Decorators ---
 
-    async def on_remove_confirm(self, interaction: nextcord.Interaction):
-        await interaction.response.defer() # <-- ADD THIS
-        session = loot_sessions.get(self.session_id)
-        if not session: return
-        ids_to_remove = set(int(id_str) for id_str in session.get("members_to_remove", []))
-        if ids_to_remove:
-            session["rolls"] = [r for r in session["rolls"] if r["member"].id not in ids_to_remove]
-            session["members_to_remove"] = None
-        await self.update_messages(interaction)
+    # Note: For dropdowns created dynamically, we can't use a decorator.
+    # So we create a static class for it and add it dynamically.
+    class RemoveSelect(nextcord.ui.Select):
+        def __init__(self, options):
+            super().__init__(placeholder="Select participants to remove...", options=options,
+                             custom_id="remove_select", min_values=0, max_values=len(options))
+        async def callback(self, interaction: nextcord.Interaction):
+            session = loot_sessions.get(self.view.session_id)
+            session["members_to_remove"] = self.values
+            self.view.update_dynamic_components()
+            await interaction.response.edit_message(view=self.view)
 
-    async def on_item_select(self, interaction: nextcord.Interaction):
-        session = loot_sessions.get(self.session_id)
-        if not session: return
+    class ItemSelect(nextcord.ui.Select):
+        def __init__(self, chunk, chunk_index, selected_values):
+            options = [
+                nextcord.SelectOption(
+                    label=(f"{item['display_number']}. {item['name']}"[:97] + '...') if len(f"{item['display_number']}. {item['name']}") > 100 else f"{item['display_number']}. {item['name']}",
+                    value=str(original_index), default=str(original_index) in selected_values
+                ) for original_index, item in chunk
+            ]
+            placeholder = "Choose items..."
+            if len(options) > 1 and (chunk[0][1]['display_number'] != chunk[-1][1]['display_number']):
+                placeholder = f"Choose items ({chunk[0][1]['display_number']}-{chunk[-1][1]['display_number']})..."
+            
+            super().__init__(placeholder=placeholder, options=options, custom_id=f"item_select_{chunk_index}", min_values=0, max_values=len(options))
         
-        newly_selected_values = interaction.data["values"]
-        dropdown_id = interaction.data["custom_id"]
-        dropdown_index = int(dropdown_id.split("_")[-1])
-        
-        available_items = [(index, item) for index, item in enumerate(session["items"]) if not item["assigned_to"]]
-        item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
-        
-        possible_values_in_this_dropdown = {str(index) for index, item in item_chunks[dropdown_index]}
-        current_master_selection = set(session.get("selected_items") or [])
-        current_master_selection -= possible_values_in_this_dropdown
-        current_master_selection.update(newly_selected_values)
-        session["selected_items"] = list(current_master_selection)
-        
-        self.update_components()
-        await interaction.response.edit_message(view=self)
+        async def callback(self, interaction: nextcord.Interaction):
+            session = loot_sessions.get(self.view.session_id)
+            dropdown_index = int(self.custom_id.split("_")[-1])
+            available_items = [(i, item) for i, item in enumerate(session["items"]) if not item["assigned_to"]]
+            item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
+            
+            possible_values = {str(index) for index, item in item_chunks[dropdown_index]}
+            current_selection = set(session.get("selected_items") or [])
+            current_selection -= possible_values
+            current_selection.update(self.values)
+            session["selected_items"] = list(current_selection)
+            
+            self.view.update_dynamic_components()
+            await interaction.response.edit_message(view=self.view)
 
-    async def on_assign(self, interaction: nextcord.Interaction):
-        await interaction.response.defer() # <-- ADD THIS
-        session = loot_sessions.get(self.session_id)
-        if not session: return
-        
-        selected_indices = session.get("selected_items")
-        current_picker_id = session["rolls"][session["current_turn"]]["member"].id
-        
-        session["last_action"] = {
-            "turn": session["current_turn"],
-            "round": session["round"],
-            "direction": session["direction"],
-            "just_reversed": session.get("just_reversed", False),
-            "assigned_indices": [int(i) for i in selected_indices] if selected_indices else []
-        }
-        
-        if selected_indices:
-            for index_str in selected_indices:
-                session["items"][int(index_str)]["assigned_to"] = current_picker_id
-        
-        session["selected_items"] = None
-        self._advance_turn_snake(session)
-        await self.update_messages(interaction)
+    # Note: For buttons that change state (e.g., Start/Skip), we also define them as classes.
+    class RemoveConfirmButton(nextcord.ui.Button):
+        def __init__(self, disabled):
+            super().__init__(label="Remove Selected", style=nextcord.ButtonStyle.danger, emoji="✖️",
+                             custom_id="remove_confirm_button", disabled=disabled)
+        async def callback(self, interaction: nextcord.Interaction):
+            await interaction.response.defer()
+            session = loot_sessions.get(self.view.session_id)
+            ids_to_remove = {int(id_str) for id_str in (session.get("members_to_remove") or [])}
+            if ids_to_remove:
+                session["rolls"] = [r for r in session["rolls"] if r["member"].id not in ids_to_remove]
+                session["members_to_remove"] = None
+            await self.view._update_all_messages(interaction)
 
-    async def on_skip(self, interaction: nextcord.Interaction):
-        await interaction.response.defer() # <-- ADD THIS
-        session = loot_sessions.get(self.session_id)
-        if not session: return
-        
-        if session["current_turn"] != -1:
+    class AssignButton(nextcord.ui.Button):
+        def __init__(self, disabled):
+            super().__init__(label="Assign Selected", style=nextcord.ButtonStyle.green, emoji="✅",
+                             custom_id="assign_button", disabled=disabled)
+        async def callback(self, interaction: nextcord.Interaction):
+            await interaction.response.defer()
+            session = loot_sessions.get(self.view.session_id)
+            selected_indices = session.get("selected_items")
+            
             session["last_action"] = {
-                "turn": session["current_turn"],
-                "round": session["round"],
-                "direction": session["direction"],
-                "just_reversed": session.get("just_reversed", False),
+                "turn": session["current_turn"], "round": session["round"],
+                "direction": session["direction"], "just_reversed": session.get("just_reversed", False),
+                "assigned_indices": [int(i) for i in selected_indices] if selected_indices else []
+            }
+            
+            if selected_indices:
+                picker_id = session["rolls"][session["current_turn"]]["member"].id
+                for index_str in selected_indices:
+                    session["items"][int(index_str)]["assigned_to"] = picker_id
+            
+            session["selected_items"] = None
+            self.view._advance_turn_snake(session)
+            await self.view._update_all_messages(interaction)
+
+    class StartButton(nextcord.ui.Button):
+        def __init__(self):
+            super().__init__(label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="skip_button")
+        async def callback(self, interaction: nextcord.Interaction):
+            await interaction.response.defer()
+            session = loot_sessions.get(self.view.session_id)
+            session.update({"members_to_remove": None, "last_action": None, "selected_items": None})
+            self.view._advance_turn_snake(session)
+            await self.view._update_all_messages(interaction)
+
+    class SkipButton(nextcord.ui.Button):
+        def __init__(self):
+            super().__init__(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button")
+        async def callback(self, interaction: nextcord.Interaction):
+            await interaction.response.defer()
+            session = loot_sessions.get(self.view.session_id)
+            session["last_action"] = {
+                "turn": session["current_turn"], "round": session["round"],
+                "direction": session["direction"], "just_reversed": session.get("just_reversed", False),
                 "assigned_indices": []
             }
+            session["selected_items"] = None
+            self.view._advance_turn_snake(session)
+            await self.view._update_all_messages(interaction)
 
-        session["selected_items"] = None
-        if session["current_turn"] == -1:
-            session["members_to_remove"] = None
-            session["last_action"] = None
+    class UndoButton(nextcord.ui.Button):
+        def __init__(self, disabled):
+            super().__init__(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️",
+                             custom_id="undo_button", disabled=disabled)
+        async def callback(self, interaction: nextcord.Interaction):
+            await interaction.response.defer()
+            session = loot_sessions.get(self.view.session_id)
+            last_action = session.get("last_action")
+            if not last_action:
+                return await interaction.followup.send("❌ There is nothing to undo.", ephemeral=True)
+
+            for index in last_action.get("assigned_indices", []):
+                if index < len(session["items"]):
+                    session["items"][index]["assigned_to"] = None
             
-        self._advance_turn_snake(session)
-        await self.update_messages(interaction)
+            session.update({k: v for k, v in last_action.items() if k != "assigned_indices"})
+            session.update({"last_action": None, "selected_items": None})
+            await self.view._update_all_messages(interaction)
 
-    async def on_undo(self, interaction: nextcord.Interaction):
-        await interaction.response.defer() # <-- ADD THIS
-        session = loot_sessions.get(self.session_id)
-        if not session: return
-
-        last_action = session.get("last_action")
-        if not last_action:
-            await interaction.followup.send("❌ There is nothing to undo.", ephemeral=True)
-            return
-
-        indices_to_unassign = last_action.get("assigned_indices", [])
-        for index in indices_to_unassign:
-            if index < len(session["items"]):
-                session["items"][index]["assigned_to"] = None
-
-        session["current_turn"] = last_action["turn"]
-        session["round"] = last_action["round"]
-        session["direction"] = last_action["direction"]
-        session["just_reversed"] = last_action["just_reversed"]
-        
-        session["last_action"] = None
-        session["selected_items"] = None
-        
-        await self.update_messages(interaction)
 
 # ===================================================================================================
 # MODAL POP-UP FOR LOOT SETUP
@@ -539,7 +426,7 @@ class LootModal(nextcord.ui.Modal):
         super().__init__("RNGenie Loot Manager")
         self.loot_items = nextcord.ui.TextInput(
             label="List Items Below (One Per Line) Then Submit", 
-            placeholder="Type your items here\nEach line is considered an item", 
+            placeholder="Type your items here\nEach line is considered an item\nExample: 2x Health Potion or x2 Health Potion", 
             required=True, 
             style=nextcord.TextInputStyle.paragraph,
             max_length=1000
@@ -551,117 +438,70 @@ class LootModal(nextcord.ui.Modal):
         await interaction.response.defer(ephemeral=True)
 
         if not interaction.user.voice or not interaction.user.voice.channel:
-            await interaction.followup.send("❌ You must be in a voice channel to set up a loot roll.", ephemeral=True)
-            return
+            return await interaction.followup.send("❌ You must be in a voice channel to set up a loot roll.", ephemeral=True)
         
-        members_in_channel = interaction.user.voice.channel.members
+        members_in_channel = list(interaction.user.voice.channel.members)
         
-        if len(members_in_channel) > 20:
-            await interaction.followup.send(f"❌ Too many users in the voice channel ({len(members_in_channel)})! The maximum is 20.", ephemeral=True)
-            return
         if not members_in_channel:
-            await interaction.followup.send("❌ I could not find anyone in your voice channel. This is likely a permissions issue.", ephemeral=True)
-            return
+            return await interaction.followup.send("❌ I could not find anyone in your voice channel. This is likely a permissions issue.", ephemeral=True)
+        if len(members_in_channel) > 20:
+            return await interaction.followup.send(f"❌ Too many users in the voice channel ({len(members_in_channel)})! The maximum is 20.", ephemeral=True)
 
         # --- Tie-Breaker Rolling Logic ---
-        # 1. Initial shuffle for fairness, then initial 1-100 roll for everyone.
-        random.shuffle(members_in_channel) # <-- ADD THIS LINE BACK
+        random.shuffle(members_in_channel)
         rolls = [{"member": m, "roll": random.randint(1, 100)} for m in members_in_channel]
 
-        # 2. Group members by their initial roll to find ties.
-        rolls.sort(key=lambda x: x['roll']) # Sort ascending to make grouping easier.
-        
+        rolls.sort(key=lambda x: x['roll'])
         processed_rolls = []
-        for roll_value, group in groupby(rolls, key=lambda x: x['roll']):
+        for _, group in groupby(rolls, key=lambda x: x['roll']):
             group_list = list(group)
-            # 3. If a group has more than one person, it's a tie.
             if len(group_list) > 1:
-                # Create a tie-breaker roll list (e.g., [1, 2, 3] for 3 people).
                 tie_rolls = list(range(1, len(group_list) + 1))
-                random.shuffle(tie_rolls) # Shuffle to randomly assign the tie-breaker numbers.
+                random.shuffle(tie_rolls)
                 for i, member_dict in enumerate(group_list):
-                    # Assign the unique tie-breaker roll to each person in the tied group.
                     member_dict['tiebreaker_roll'] = tie_rolls[i]
             processed_rolls.extend(group_list)
 
-        # 4. Final multi-level sort.
-        # First, sort by the tie-breaker roll (ascending, lower is better).
-        # The .get() provides a default, non-interfering value for non-tied members.
         processed_rolls.sort(key=lambda x: x.get('tiebreaker_roll', 0))
-        # Finally, sort by the main roll (descending). Python's sort is stable,
-        # so the tie-breaker order we just established will be preserved.
         processed_rolls.sort(key=lambda x: x['roll'], reverse=True)
-        
         rolls = processed_rolls
         
-        # Parse the input, handling the "Nx Item Name" syntax for stacked items.
+        # --- Item Parsing Logic ---
         item_names = []
-        raw_lines = self.loot_items.value.split('\n')
-
-        for line in raw_lines:
+        for line in self.loot_items.value.split('\n'):
             stripped_line = line.strip()
-            if not stripped_line:
-                continue
+            if not stripped_line: continue
 
-            # Check for the "Nx" prefix using a regular expression.
-            # This looks for a number (e.g., 2), followed by 'x' or 'X', then optional space.
-            match = re.match(r"(\d+)[xX]\s*(.*)", stripped_line)
-            
+            match = re.match(r"(?i)(?:(\d+)x|x(\d+))\s*(.*)", stripped_line)
             if match:
                 try:
-                    count = int(match.group(1))
-                    name = match.group(2).strip()
-                    if name:  # Ensure the item name is not empty after the prefix.
-                        # Add the item 'count' times to the list.
-                        item_names.extend([name] * count)
+                    count_str = match.group(1) or match.group(2)
+                    name = match.group(3).strip()
+                    if name: item_names.extend([name] * int(count_str))
                 except (ValueError, IndexError):
-                    # If something goes wrong with parsing, treat the line as a regular item.
                     item_names.append(stripped_line)
             else:
-                # If no "Nx" prefix is found, add the item to the list once.
                 item_names.append(stripped_line)
         
-        # Now, enumerate the fully expanded list to create the final data structure with sequential numbers.
-        items_data = [
-            {"name": name, "assigned_to": None, "display_number": i}
-            for i, name in enumerate(item_names, 1)
-        ]
+        items_data = [{"name": name, "assigned_to": None, "display_number": i} for i, name in enumerate(item_names, 1)]
         if not items_data:
-            await interaction.followup.send("⚠️ You must enter at least one item.", ephemeral=True)
-            return
+            return await interaction.followup.send("⚠️ You must enter at least one item.", ephemeral=True)
         
-        # Send two placeholder messages to get their IDs.
+        # --- Message & Session Creation ---
         loot_list_message = await interaction.followup.send("`Initializing Loot List (1/2)...`", wait=True)
         control_panel_message = await interaction.channel.send("`Initializing Control Panel (2/2)...`")
 
-        session_id = control_panel_message.id # The session is keyed by the control panel message ID.
-
-        # Construct the initial session state dictionary.
         session = { 
-            "rolls": rolls,                     # List of {"member", "roll"} sorted by roll.
-            "items": items_data,                # List of {"name", "assigned_to", "display_number"}.
-            "current_turn": -1,                 # Index of the current picker in the rolls list. -1 is pre-start.
-            "invoker_id": interaction.user.id,  # The Loot Master's ID.
-            "invoker": interaction.user,        # The Loot Master's member object.
-            "selected_items": None,             # A list of original item indices selected in the dropdown.
-            "round": 0,                         # The current loot round.
-            "direction": 1,                     # The direction of the snake draft (1 or -1).
-            "just_reversed": False,             # Flag for messaging if the turn order just reversed.
-            "members_to_remove": None,          # A list of member IDs selected for removal.
-            "channel_id": interaction.channel.id, # The channel where the session is active.
-            "loot_list_message_id": loot_list_message.id, # The ID of the separate loot list message.
-            "last_action": None,                # Stores the state before the last action for the undo feature.
-            "last_notification_message_id": None # Last notification message.
+            "rolls": rolls, "items": items_data, "current_turn": -1, "invoker_id": interaction.user.id,
+            "invoker": interaction.user, "selected_items": None, "round": 0, "direction": 1,
+            "just_reversed": False, "members_to_remove": None, "channel_id": interaction.channel.id,
+            "loot_list_message_id": loot_list_message.id, "last_action": None
         }
-        loot_sessions[session_id] = session
+        loot_sessions[control_panel_message.id] = session
         
-        # Now, edit the messages with their full initial content and the interactive view.
-        loot_list_content = build_loot_list_message(session)
-        control_panel_content = build_control_panel_message(session)
-        final_view = LootControlView(session_id)
-        
-        await loot_list_message.edit(content=loot_list_content)
-        await control_panel_message.edit(content=control_panel_content, view=final_view)
+        view = LootControlView(control_panel_message.id)
+        await loot_list_message.edit(content=build_loot_list_message(session))
+        await control_panel_message.edit(content=build_control_panel_message(session), view=view)
 
 
 # ===================================================================================================
@@ -674,7 +514,6 @@ async def loot(interaction: nextcord.Interaction):
     if not interaction.user.voice:
         await interaction.response.send_message("❌ You need to be in a voice channel to start a loot roll!", ephemeral=True)
         return
-    
     await interaction.response.send_modal(LootModal())
 
 
@@ -692,20 +531,18 @@ async def on_ready():
 @bot.event
 async def on_application_command_error(interaction: nextcord.Interaction, error: Exception):
     """A global error handler for all slash commands and UI interactions."""
-    print(f"\n--- Unhandled exception in interaction for command '{interaction.application_command.name}' ---")
+    print(f"\n--- Unhandled exception in interaction for command '{getattr(interaction.application_command, 'name', 'unknown')}' ---")
     traceback.print_exception(type(error), error, error.__traceback__)
     print("--- End of exception report ---\n")
 
-    # Attempt to send a user-friendly error message if the interaction is still valid.
     if not interaction.is_expired():
         try:
-            error_message = "❌ An unexpected error occurred. The developer has been notified via console logs."
+            error_message = "❌ An unexpected error occurred. The developer has been notified."
             if interaction.response.is_done():
                 await interaction.followup.send(error_message, ephemeral=True)
             else:
                 await interaction.response.send_message(error_message, ephemeral=True)
         except nextcord.HTTPException:
-            # This can happen if the original interaction is deleted or fails for other reasons.
             pass
 
 # ===================================================================================================
