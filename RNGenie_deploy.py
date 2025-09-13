@@ -349,20 +349,18 @@ class LootControlView(nextcord.ui.View):
         return False
 
     async def update_messages(self, interaction: nextcord.Interaction):
-        """
-        Refreshes messages, sends a private notification, and cleans up the previous notification.
-        """
         session = loot_sessions.get(self.session_id)
         if not session: return
-
-        # Before doing anything else, find and delete the last turn's private message.
-        if session.get("last_ephemeral_message"):
+        
+        # --- Clean up the previous temporary notification message ---
+        if session.get("last_notification_message_id"):
             try:
-                await session["last_ephemeral_message"].delete()
+                channel = bot.get_channel(session["channel_id"])
+                old_msg = await channel.fetch_message(session["last_notification_message_id"])
+                await old_msg.delete()
             except (nextcord.NotFound, nextcord.Forbidden, nextcord.HTTPException):
-                # Failsafe in case the message was already deleted or is otherwise inaccessible.
-                pass
-            session["last_ephemeral_message"] = None
+                pass # Failsafe if message is already gone.
+            session["last_notification_message_id"] = None
 
         try:
             channel = bot.get_channel(session["channel_id"])
@@ -391,20 +389,20 @@ class LootControlView(nextcord.ui.View):
             await loot_list_msg.edit(content=loot_list_content)
             await control_panel_msg.edit(content=control_panel_content, view=self)
 
-        # --- Send new Ephemeral Turn Notification ---
+        # --- Send Temporary Public Notification ---
         is_active_turn = session["current_turn"] >= 0 and session["current_turn"] < len(session["rolls"])
         
         if is_active_turn:
             picker = session["rolls"][session["current_turn"]]["member"]
-            notification_content = (
-                f"🔔 **It's your turn to pick, {picker.mention}!**\n"
-                "Use the dropdowns on the message above to make your selection. Then click somewhere else to close the dropdowns for your selection to be updated. Then click '✅ Assign Selected' when you are ready."
-            )
+            notification_content = f"🔔 It's your turn to pick, {picker.mention}!\nUse the dropdowns on the message above to make your selection. Then click somewhere else to close the dropdowns for your selection to be updated.\nThen click '✅ Assign Selected' when you are ready."
             try:
-                # Send the new private message and store a reference to it.
-                new_ephemeral_msg = await interaction.followup.send(notification_content, ephemeral=True)
-                session["last_ephemeral_message"] = new_ephemeral_msg
-            except nextcord.HTTPException:
+                # Send a normal message that pings the user.
+                # Use wait=True to get the message object back.
+                temp_msg = await interaction.channel.send(notification_content, delete_after=10.0)
+                # Store its ID so we can delete it on the next turn.
+                session["last_notification_message_id"] = temp_msg.id
+            except (nextcord.Forbidden, nextcord.HTTPException):
+                # Bot may not have permission to send messages.
                 pass
             
     async def on_timeout(self):
@@ -656,7 +654,7 @@ class LootModal(nextcord.ui.Modal):
             "channel_id": interaction.channel.id, # The channel where the session is active.
             "loot_list_message_id": loot_list_message.id, # The ID of the separate loot list message.
             "last_action": None,                # Stores the state before the last action for the undo feature.
-            "last_ephemeral_message": None      # Last ephemeral message.
+            "last_notification_message_id": None # Last notification message.
         }
         loot_sessions[session_id] = session
         
