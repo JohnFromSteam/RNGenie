@@ -476,8 +476,8 @@ class ControlPanelView(nextcord.ui.View):
 
 async def _refresh_all_messages(session_id, interaction=None):
     """Centralized message update: control panel, loot list, and item dropdown.
-       This function will delete and recreate the third message (item dropdown) whenever called,
-       which satisfies 'deletes itself immediately on the next turn and repopulates again...'."""
+       Only creates the item-dropdown message when the session is active (picker's turn).
+       Deletes any old item message each refresh so it 'self-deletes on next turn' when recreated."""
     session = loot_sessions.get(session_id)
     if not session:
         if interaction and not interaction.is_expired():
@@ -489,22 +489,20 @@ async def _refresh_all_messages(session_id, interaction=None):
         loot_sessions.pop(session_id, None)
         return
 
-    # fetch messages (control panel is keyed by session_id)
+    # fetch control panel (session_id is control panel message id)
     try:
         control_panel_msg = await channel.fetch_message(session_id)
     except (nextcord.NotFound, nextcord.Forbidden):
-        # session lost
         loot_sessions.pop(session_id, None)
         return
 
-    # loot list message
+    # loot list message (may be None if deleted)
     try:
         loot_list_msg = await channel.fetch_message(session["loot_list_message_id"])
     except (nextcord.NotFound, nextcord.Forbidden):
         loot_list_msg = None
 
-    # delete and recreate the item-dropdown message every refresh (per your requested behavior)
-    # if one exists, delete it
+    # delete existing item-dropdown message if present (we'll recreate conditionally)
     old_item_msg_id = session.get("item_dropdown_message_id")
     if old_item_msg_id:
         try:
@@ -514,7 +512,7 @@ async def _refresh_all_messages(session_id, interaction=None):
             pass
         session["item_dropdown_message_id"] = None
 
-    # Handle session completion (no items left)
+    # If all items assigned -> finalize and cleanup
     if not _are_items_left(session) and session["current_turn"] != -1:
         final_content = build_final_summary_message(session, timed_out=False)
         await control_panel_msg.edit(content=final_content, view=None)
@@ -526,32 +524,33 @@ async def _refresh_all_messages(session_id, interaction=None):
         loot_sessions.pop(session_id, None)
         return
 
-    # Normal update: rebuild messages and views
+    # Normal update: update loot list and control panel content
     loot_list_content = build_loot_list_message(session)
     control_panel_content = build_control_panel_message(session)
-    # update control panel
     control_view = ControlPanelView(session_id)
     await control_panel_msg.edit(content=control_panel_content, view=control_view)
-
     if loot_list_msg:
         await loot_list_msg.edit(content=loot_list_content)
 
-    # Create new item-dropdown message (3rd message) with mention text in content as requested.
-    # The content includes the requested mention message (so it repopulates 'with the mention of: ...').
+    # ---- ONLY create the third (item-dropdown) message if session is active (not pre-start)
+    is_active_pick = (0 <= session["current_turn"] < len(session["rolls"])) and _are_items_left(session)
+    if not is_active_pick:
+        # We're in pre-start or no active picker; do NOT create the item-dropdown message.
+        session["item_dropdown_message_id"] = None
+        return
+
+    # Create the item-dropdown message appropriate for an active picker's turn:
     invoker = session["invoker"]
+    picker = session["rolls"][session["current_turn"]]["member"]
     item_message_content = (
-        "🎁 **Loot distribution is ready!**\n\n"
-        f"✍️ **Loot Manager {invoker.mention} can remove participants or click below to begin.**\n\n"
+        f"🎁 **Loot distribution is live!**\n\n"
+        f"✍️ **Loot Manager {invoker.mention} — {picker.mention} it is your turn.**\n\n"
         "Choose items below (if it is your turn)."
     )
 
+    # Build the view and send it; store message id so it can be deleted on next refresh/turn.
     item_view = ItemDropdownView(session_id)
-    # send the item dropdown message and store its id
-    if interaction and not interaction.is_expired():
-        # If this was triggered by an interaction, respond by sending message in the same channel
-        item_msg = await channel.send(item_message_content, view=item_view)
-    else:
-        item_msg = await channel.send(item_message_content, view=item_view)
+    item_msg = await channel.send(item_message_content, view=item_view)
     session["item_dropdown_message_id"] = item_msg.id
 
 
