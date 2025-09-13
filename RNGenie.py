@@ -99,7 +99,7 @@ def build_control_panel_message(session):
 
     # --- Footer (Turn Indicator) ---
     footer = ""
-    if session["current_turn"] >= 0:
+    if session["current_turn"] >= 0 and session["current_turn"] < len(rolls):
         picker = session["rolls"][session["current_turn"]]["member"]
         direction = "Normal Order" if session["direction"] == 1 else "Reverse Order"
         turn_text = "turn again!" if session.get("just_reversed") else "turn!"
@@ -168,24 +168,16 @@ def build_final_summary_message(session, timed_out=False):
 # ===================================================================================================
 
 class LootControlView(nextcord.ui.View):
+    """
+    Manages the interactive components for a loot session.
+    """
     def __init__(self, session_id):
         super().__init__(timeout=SESSION_TIMEOUT_SECONDS)
         self.session_id = session_id
-        self._add_static_components()
         self.update_dynamic_components()
 
-    def _add_static_components(self):
-        """Adds components that are always present but may be disabled."""
-        self.remove_select = self.RemoveSelect([])
-        self.remove_confirm_button = self.RemoveConfirmButton(disabled=True)
-        self.start_button = self.StartButton()
-        self.assign_button = self.AssignButton(disabled=True)
-        self.skip_button = self.SkipButton()
-        self.undo_button = self.UndoButton(disabled=True)
-        self.item_selects = []
-
     def update_dynamic_components(self):
-        """Adds the correct UI components to the view based on the session's state."""
+        """Re-generates the set of components based on the session's state."""
         session = loot_sessions.get(self.session_id)
         self.clear_items()
         if not session or not any(not item["assigned_to"] for item in session["items"]): return
@@ -196,36 +188,31 @@ class LootControlView(nextcord.ui.View):
             self._add_active_loot_components(session)
 
     def _add_pre_loot_components(self, session):
-        """Adds the UI components for the participant management phase."""
+        """Adds UI components for the participant management phase."""
         member_options = [
             nextcord.SelectOption(label=r['member'].display_name, value=str(r['member'].id),
                                   default=str(r['member'].id) in (session.get("members_to_remove") or []))
             for r in session["rolls"] if r['member'].id != session["invoker_id"]
         ]
         if member_options:
-            self.remove_select.options = member_options
-            self.add_item(self.remove_select)
+            self.add_item(self.RemoveSelect(member_options))
         
-        self.remove_confirm_button.disabled = not session.get("members_to_remove")
-        self.add_item(self.remove_confirm_button)
-        self.add_item(self.start_button)
+        self.add_item(self.RemoveConfirmButton(disabled=not session.get("members_to_remove")))
+        self.add_item(self.StartButton())
 
     def _add_active_loot_components(self, session):
-        """Adds the UI components for the active looting phase."""
-        self.item_selects.clear()
+        """Adds UI components for the active looting phase."""
         available_items = [(i, item) for i, item in enumerate(session["items"]) if not item["assigned_to"]]
         if available_items:
+            # Chunk items into groups of 25 for multiple dropdowns if necessary.
             for i, chunk in enumerate(available_items[i:i + 25] for i in range(0, len(available_items), 25)):
-                item_select = self.ItemSelect(chunk, i, session.get("selected_items") or [])
-                self.item_selects.append(item_select)
-                self.add_item(item_select)
+                if chunk: # Failsafe to prevent creating a select menu with zero options.
+                    self.add_item(self.ItemSelect(chunk, i, session.get("selected_items") or []))
         
-        self.assign_button.disabled = not session.get("selected_items")
-        self.add_item(self.assign_button)
-        self.add_item(self.skip_button)
-        self.undo_button.disabled = not session.get("last_action")
-        self.add_item(self.undo_button)
-    
+        self.add_item(self.AssignButton(disabled=not session.get("selected_items")))
+        self.add_item(self.SkipButton())
+        self.add_item(self.UndoButton(disabled=not session.get("last_action")))
+
     def _advance_turn_snake(self, session):
         """Calculates the next turn in a "snake draft" order (1->N, N->1)."""
         session["just_reversed"] = False
@@ -255,7 +242,7 @@ class LootControlView(nextcord.ui.View):
         if interaction.user.id == session["invoker_id"]:
             return True
             
-        if interaction.data.get("custom_id") == "undo_button":
+        if "undo_button" in interaction.data.get("custom_id", ""):
             await interaction.response.send_message("🛡️ Only the Loot Manager can use the Undo button.", ephemeral=True)
             return False
 
@@ -324,7 +311,7 @@ class LootControlView(nextcord.ui.View):
         finally:
             loot_sessions.pop(self.session_id, None)
 
-    # --- Component Definitions and Callbacks ---
+    # --- Component Classes for Dynamic Addition ---
 
     class RemoveSelect(nextcord.ui.Select):
         def __init__(self, options):
@@ -401,7 +388,7 @@ class LootControlView(nextcord.ui.View):
 
     class StartButton(nextcord.ui.Button):
         def __init__(self):
-            super().__init__(label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="skip_button")
+            super().__init__(label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="start_button")
         async def callback(self, interaction: nextcord.Interaction):
             await interaction.response.defer()
             session = loot_sessions.get(self.view.session_id)
