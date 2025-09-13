@@ -352,16 +352,6 @@ class LootControlView(nextcord.ui.View):
         session = loot_sessions.get(self.session_id)
         if not session: return
         
-        # --- Clean up the previous temporary notification message ---
-        if session.get("last_notification_message_id"):
-            try:
-                channel = bot.get_channel(session["channel_id"])
-                old_msg = await channel.fetch_message(session["last_notification_message_id"])
-                await old_msg.delete()
-            except (nextcord.NotFound, nextcord.Forbidden, nextcord.HTTPException):
-                pass # Failsafe if message is already gone.
-            session["last_notification_message_id"] = None
-
         try:
             channel = bot.get_channel(session["channel_id"])
             loot_list_msg = await channel.fetch_message(session["loot_list_message_id"])
@@ -389,21 +379,28 @@ class LootControlView(nextcord.ui.View):
             await loot_list_msg.edit(content=loot_list_content)
             await control_panel_msg.edit(content=control_panel_content, view=self)
 
-        # --- Send Temporary Public Notification ---
+        # --- Send Direct Message Notification ---
         is_active_turn = session["current_turn"] >= 0 and session["current_turn"] < len(session["rolls"])
         
         if is_active_turn:
             picker = session["rolls"][session["current_turn"]]["member"]
-            notification_content = f"🔔 It's your turn to pick, {picker.mention}!\nUse the dropdowns on the message above to make your selection. Then click somewhere else to close the dropdowns for your selection to be updated.\nThen click '✅ Assign Selected' when you are ready."
+            # Create a link to the control panel message for easy navigation.
+            jump_url = control_panel_msg.jump_url
+            notification_content = (
+                f"🔔 **It's your turn to pick in the loot session!**\n\n"
+                f"Click here to jump back to the channel: {jump_url}\n\n"
+                "*This message will self-destruct in 30 seconds.*"
+            )
             try:
-                # Send a normal message that pings the user.
-                # Use wait=True to get the message object back.
-                temp_msg = await interaction.channel.send(notification_content, delete_after=10.0)
-                # Store its ID so we can delete it on the next turn.
-                session["last_notification_message_id"] = temp_msg.id
-            except (nextcord.Forbidden, nextcord.HTTPException):
-                # Bot may not have permission to send messages.
-                pass
+                # Send the Direct Message with a 30-second self-destruct timer.
+                await picker.send(notification_content, delete_after=30.0)
+            except nextcord.Forbidden:
+                # This happens if the user has DMs disabled for server members.
+                # We can log it to the console for the bot owner to see.
+                print(f"Could not send DM to {picker.display_name}. They may have DMs disabled.")
+            except nextcord.HTTPException as e:
+                # Handle other potential Discord API errors.
+                print(f"Failed to send DM notification: {e}")
             
     async def on_timeout(self):
         session = loot_sessions.get(self.session_id)
