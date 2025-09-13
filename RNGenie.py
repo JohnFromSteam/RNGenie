@@ -244,8 +244,14 @@ class ItemDropdownView(nextcord.ui.View):
 
             assign_disabled = not session.get("selected_items")
             self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.green, emoji="✅", custom_id="assign_button", disabled=assign_disabled))
-        # Allow skipping even if not picking? We'll only show Skip if there's an active picker
+
+        # Skip Turn is shown regardless (keeps parity with your template)
         self.add_item(nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button"))
+
+        # Add Undo next to Skip Turn: only enabled when there's something to undo.
+        # Permission enforcement happens in the on_undo handler (only invoker allowed).
+        undo_disabled = not session.get("last_action")
+        self.add_item(nextcord.ui.Button(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=undo_disabled))
 
         # assign callbacks
         for child in self.children:
@@ -254,6 +260,8 @@ class ItemDropdownView(nextcord.ui.View):
                     child.callback = self.on_assign
                 if child.custom_id == "skip_button":
                     child.callback = self.on_skip
+                if child.custom_id == "undo_button":
+                    child.callback = self.on_undo
                 if hasattr(child, "options") and "item_select" in child.custom_id:
                     child.callback = self.on_item_select
 
@@ -280,7 +288,8 @@ class ItemDropdownView(nextcord.ui.View):
         current_master |= newly_selected
         session["selected_items"] = list(current_master)
 
-        await _refresh_all_messages(self.session_id, interaction, delete_item=False)
+        # Do NOT delete/recreate the third message on mere selection; just edit it in-place.
+        await _refresh_all_messages(self.session_id, interaction)
 
     async def on_assign(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
@@ -335,6 +344,38 @@ class ItemDropdownView(nextcord.ui.View):
             session["last_action"] = None
 
         _advance_turn_snake(session)
+        await _refresh_all_messages(self.session_id, interaction)
+
+    async def on_undo(self, interaction: nextcord.Interaction):
+        """Undo button placed next to Skip Turn. Only Loot Manager (invoker) allowed."""
+        session = loot_sessions.get(self.session_id)
+        if not session:
+            await interaction.response.send_message("Session expired.", ephemeral=True)
+            return
+
+        # permission check
+        if interaction.user.id != session["invoker_id"]:
+            await interaction.response.send_message("🛡️ Only the Loot Manager can use Undo.", ephemeral=True)
+            return
+
+        last_action = session.get("last_action")
+        if not last_action:
+            await interaction.response.send_message("❌ There is nothing to undo.", ephemeral=True)
+            return
+
+        indices_to_unassign = last_action.get("assigned_indices", [])
+        for idx in indices_to_unassign:
+            if 0 <= idx < len(session["items"]):
+                session["items"][idx]["assigned_to"] = None
+
+        session["current_turn"] = last_action["turn"]
+        session["round"] = last_action["round"]
+        session["direction"] = last_action["direction"]
+        session["just_reversed"] = last_action.get("just_reversed", False)
+
+        session["last_action"] = None
+        session["selected_items"] = None
+
         await _refresh_all_messages(self.session_id, interaction)
 
 
