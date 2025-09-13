@@ -168,13 +168,21 @@ def build_final_summary_message(session, timed_out=False):
 # ===================================================================================================
 
 class LootControlView(nextcord.ui.View):
-    """
-    Manages the interactive components for a loot session using UI Kit decorators.
-    """
     def __init__(self, session_id):
         super().__init__(timeout=SESSION_TIMEOUT_SECONDS)
         self.session_id = session_id
+        self._add_static_components()
         self.update_dynamic_components()
+
+    def _add_static_components(self):
+        """Adds components that are always present but may be disabled."""
+        self.remove_select = self.RemoveSelect([])
+        self.remove_confirm_button = self.RemoveConfirmButton(disabled=True)
+        self.start_button = self.StartButton()
+        self.assign_button = self.AssignButton(disabled=True)
+        self.skip_button = self.SkipButton()
+        self.undo_button = self.UndoButton(disabled=True)
+        self.item_selects = []
 
     def update_dynamic_components(self):
         """Adds the correct UI components to the view based on the session's state."""
@@ -195,24 +203,29 @@ class LootControlView(nextcord.ui.View):
             for r in session["rolls"] if r['member'].id != session["invoker_id"]
         ]
         if member_options:
-            # We must pass the options to the constructor of the inner class.
-            self.add_item(self.RemoveSelect(member_options))
+            self.remove_select.options = member_options
+            self.add_item(self.remove_select)
         
-        self.add_item(self.RemoveConfirmButton(disabled=not session.get("members_to_remove")))
-        self.add_item(self.StartButton())
+        self.remove_confirm_button.disabled = not session.get("members_to_remove")
+        self.add_item(self.remove_confirm_button)
+        self.add_item(self.start_button)
 
     def _add_active_loot_components(self, session):
         """Adds the UI components for the active looting phase."""
+        self.item_selects.clear()
         available_items = [(i, item) for i, item in enumerate(session["items"]) if not item["assigned_to"]]
         if available_items:
             for i, chunk in enumerate(available_items[i:i + 25] for i in range(0, len(available_items), 25)):
-                self.add_item(self.ItemSelect(chunk, i, session.get("selected_items") or []))
+                item_select = self.ItemSelect(chunk, i, session.get("selected_items") or [])
+                self.item_selects.append(item_select)
+                self.add_item(item_select)
         
-        self.add_item(self.AssignButton(disabled=not session.get("selected_items")))
-        self.add_item(self.SkipButton())
-        self.add_item(self.UndoButton(disabled=not session.get("last_action")))
+        self.assign_button.disabled = not session.get("selected_items")
+        self.add_item(self.assign_button)
+        self.add_item(self.skip_button)
+        self.undo_button.disabled = not session.get("last_action")
+        self.add_item(self.undo_button)
     
-    # RESTORED THIS METHOD
     def _advance_turn_snake(self, session):
         """Calculates the next turn in a "snake draft" order (1->N, N->1)."""
         session["just_reversed"] = False
