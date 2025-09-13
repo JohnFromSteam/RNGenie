@@ -155,8 +155,6 @@ def build_control_panel_message(session):
         turn_text = "turn!" if not session.get("just_reversed", False) else "turn (direction reversed)!"
         indicator = (
             f"\n🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
-            f"**{picker_emoji} {picker.mention}'s {turn_text}**\n\n"
-            f"✍️ **Loot Manager:** {invoker.mention}\n"
         )
     else:
         indicator = f"\n🎁 **Loot distribution is ready!**\n\n✍️ **Loot Manager {invoker.mention} can remove participants or click below to begin.**"
@@ -545,10 +543,16 @@ async def _refresh_all_messages(session_id, interaction=None, delete_item=True):
     # Create the item-dropdown message appropriate for an active picker's turn:
     invoker = session["invoker"]
     picker = session["rolls"][session["current_turn"]]["member"]
+
+    # small helpers used elsewhere — keep wording consistent with the control-panel
+    picker_emoji = NUMBER_EMOJIS.get(session['current_turn'] + 1, "👉")
+    turn_text = "turn!" if not session.get("just_reversed", False) else "turn (direction reversed)!"
+
     item_message_content = (
-        f"✍️ **{picker.mention} it is your turn!**\n\n"
+        f"**{picker_emoji} {picker.mention}'s {turn_text}**\n\n"
         "Choose items below..."
     )
+
 
     item_view = ItemDropdownView(session_id)
 
