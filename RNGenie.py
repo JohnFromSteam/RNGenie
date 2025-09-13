@@ -45,8 +45,8 @@ ANSI_USER = "\u001b[0;34m"
 # ===================================================================================================
 
 def build_loot_list_message(session):
-    """Builds the content for the first message (1/2), which lists remaining loot."""
-    header = "**(1/2)**\n"
+    """Builds the content for the first message (1/3), which lists remaining loot."""
+    header = "**(1/3)**\n"
     if any(not item["assigned_to"] for item in session["items"]):
         remaining_body = "\n".join(
             f"{item['display_number']}. {item['name']}"
@@ -54,20 +54,19 @@ def build_loot_list_message(session):
         )
         return (
             f"{header}```ansi\n{ANSI_HEADER}❌ Remaining Loot Items ❌{ANSI_RESET}\n"
-            f"==================================\n{remaining_body}\n==================================\n```"
+            f"==================================\n{remaining_body}\n```"
         )
-    # Fallback message for when all items are gone.
     return (
         f"{header}```ansi\n{ANSI_HEADER}✅ All Items Assigned ✅{ANSI_RESET}\n"
-        f"==================================\nAll items have been distributed.\n==================================\n```"
+        f"==================================\nAll items have been distributed.\n```"
     )
 
 
 def build_control_panel_message(session):
-    """Builds the content for the second message (2/2), the main control panel."""
+    """Builds the content for the second message (2/3), the main info panel."""
     invoker = session["invoker"]
     rolls = session["rolls"]
-    header = f"**(2/2)**\n\n🎉 **Loot roll started by {invoker.mention}!**\n\n"
+    header = f"**(2/3)**\n\n🎉 **Loot roll started by {invoker.mention}!**\n\n"
 
     # --- Roll Order Section ---
     roll_order_body = "\n".join(
@@ -76,8 +75,7 @@ def build_control_panel_message(session):
         for i, r in enumerate(rolls, 1)
     )
     roll_order_section = (
-        f"```ansi\n{ANSI_HEADER}🔢 Roll Order 🔢{ANSI_RESET}\n==================================\n"
-        f"{roll_order_body}\n==================================\n```"
+        f"```ansi\n{ANSI_HEADER}🔢 Roll Order 🔢{ANSI_RESET}\n==================================\n{roll_order_body}\n```"
     )
 
     # --- Assigned Items Section ---
@@ -97,21 +95,7 @@ def build_control_panel_message(session):
         f"```ansi\n{ANSI_HEADER}✅ Assigned Items ✅{ANSI_RESET}\n==================================\n{assigned_items_body}```"
     )
 
-    # --- Footer (Turn Indicator) ---
-    footer = ""
-    if session["current_turn"] >= 0 and session["current_turn"] < len(rolls):
-        picker = session["rolls"][session["current_turn"]]["member"]
-        direction = "Normal Order" if session["direction"] == 1 else "Reverse Order"
-        turn_text = "turn again!" if session.get("just_reversed") else "turn!"
-        footer = (
-            f"🔔 **Round {session['round'] + 1}** ({direction})\n\n"
-            f"**{NUMBER_EMOJIS.get(session['current_turn'] + 1, '👉')} It is {picker.mention}'s {turn_text} **\n\n"
-            f"✍️ **{picker.mention} or {invoker.mention} must select items or skip.**"
-        )
-    else:
-        footer = f"🎁 **Loot distribution is ready!**\n\n✍️ **{invoker.mention} can remove participants or click below to begin.**"
-
-    return f"{header}{roll_order_section}\n{assigned_items_section}\n{footer}"
+    return f"{header}{roll_order_section}\n{assigned_items_section}"
 
 
 def build_final_summary_message(session, timed_out=False):
@@ -125,8 +109,7 @@ def build_final_summary_message(session, timed_out=False):
         for i, r in enumerate(session["rolls"], 1)
     )
     roll_order_section = (
-        f"```ansi\n{ANSI_HEADER}🔢 Final Roll Order 🔢{ANSI_RESET}\n==================================\n"
-        f"{roll_order_body}\n==================================\n```"
+        f"```ansi\n{ANSI_HEADER}🔢 Final Roll Order 🔢{ANSI_RESET}\n==================================\n{roll_order_body}\n```"
     )
 
     # --- Final Assigned Items Section ---
@@ -154,102 +137,61 @@ def build_final_summary_message(session, timed_out=False):
     if unclaimed_items:
         unclaimed_body = "\n".join(f"{item['display_number']}. {item['name']}" for item in unclaimed_items)
         unclaimed_section = (
-            f"```ansi\n{ANSI_HEADER}❌ Unclaimed Items ❌{ANSI_RESET}\n==================================\n"
-            f"{unclaimed_body}\n==================================\n```"
+            f"```ansi\n{ANSI_HEADER}❌ Unclaimed Items ❌{ANSI_RESET}\n==================================\n{unclaimed_body}\n```"
         )
 
     return f"{header}{roll_order_section}\n{assigned_items_section}\n{unclaimed_section}"
 
 
 # ===================================================================================================
-# DYNAMIC UI VIEW
+# DYNAMIC UI VIEWS
 # ===================================================================================================
+
+class StartView(nextcord.ui.View):
+    """A simple view with only a 'Start' button."""
+    def __init__(self, session_id):
+        super().__init__(timeout=SESSION_TIMEOUT_SECONDS)
+        self.session_id = session_id
+
+    async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
+        session = loot_sessions.get(self.session_id)
+        if session and interaction.user.id == session["invoker_id"]:
+            return True
+        await interaction.response.send_message("🛡️ Only the Loot Manager can start the session.", ephemeral=True)
+        return False
+
+    @nextcord.ui.button(label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success)
+    async def start_button(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
+        await interaction.response.defer()
+        session = loot_sessions.get(self.session_id)
+        if not session: return
+
+        session["current_turn"] = 0
+        await _update_all_messages(interaction)
+
 
 class LootControlView(nextcord.ui.View):
     """
-    Manages the interactive components for a loot session.
+    Manages the interactive components for an active looting turn.
+    A new instance of this view is created for each turn.
     """
     def __init__(self, session_id):
         super().__init__(timeout=SESSION_TIMEOUT_SECONDS)
         self.session_id = session_id
-        self._add_static_components()
-        self.update_dynamic_components()
+        self._add_components()
 
-    def _add_static_components(self):
-        """Initializes all UI components once. Their visibility and state are managed dynamically."""
-        self.remove_select = self.RemoveSelect([])
-        self.remove_confirm_button = self.RemoveConfirmButton(disabled=True)
-        self.start_button = self.StartButton()
-        self.assign_button = self.AssignButton(disabled=True)
-        self.skip_button = self.SkipButton()
-        self.undo_button = self.UndoButton(disabled=True)
-        self.item_selects = []
-
-    def update_dynamic_components(self):
-        """Configures and adds the correct UI components to the view based on the session's state."""
+    def _add_components(self):
+        """Adds the necessary components for a loot turn."""
         session = loot_sessions.get(self.session_id)
-        self.clear_items()
-        if not session or not any(not item["assigned_to"] for item in session["items"]): return
-
-        if session["current_turn"] == -1:
-            self._add_pre_loot_components(session)
-        else:
-            self._add_active_loot_components(session)
-
-    def _add_pre_loot_components(self, session):
-        """Adds UI components for the participant management phase."""
-        member_options = [
-            nextcord.SelectOption(label=r['member'].display_name, value=str(r['member'].id),
-                                  default=str(r['member'].id) in (session.get("members_to_remove") or []))
-            for r in session["rolls"] if r['member'].id != session["invoker_id"]
-        ]
-        if member_options:
-            self.remove_select.options = member_options
-            self.add_item(self.remove_select)
+        if not session: return
         
-        self.remove_confirm_button.disabled = not session.get("members_to_remove")
-        self.add_item(self.remove_confirm_button)
-        self.add_item(self.start_button)
-
-    def _add_active_loot_components(self, session):
-        """Adds UI components for the active looting phase."""
-        self.item_selects.clear()
         available_items = [(i, item) for i, item in enumerate(session["items"]) if not item["assigned_to"]]
         if available_items:
-            # Chunk items into groups of 25 for multiple dropdowns if necessary.
             for i, chunk in enumerate(available_items[i:i + 25] for i in range(0, len(available_items), 25)):
-                if chunk: # Failsafe to prevent creating a select menu with zero options.
-                    item_select = self.ItemSelect(chunk, i, session.get("selected_items") or [])
-                    self.item_selects.append(item_select)
-                    self.add_item(item_select)
-        
-        self.assign_button.disabled = not session.get("selected_items")
-        self.add_item(self.assign_button)
-        self.add_item(self.skip_button)
-        self.undo_button.disabled = not session.get("last_action")
-        self.add_item(self.undo_button)
-
-    def _advance_turn_snake(self, session):
-        """Calculates the next turn in a "snake draft" order (1->N, N->1)."""
-        session["just_reversed"] = False
-        if not any(not item["assigned_to"] for item in session["items"]):
-            session["current_turn"] = len(session["rolls"])
-            return
-
-        if session["current_turn"] == -1:
-            session["current_turn"] = 0
-            return
-
-        potential_next_turn = session["current_turn"] + session["direction"]
-        if 0 <= potential_next_turn < len(session["rolls"]):
-            session["current_turn"] = potential_next_turn
-        else:
-            session["direction"] *= -1
-            session["round"] += 1
-            session["just_reversed"] = True
+                if chunk:
+                    self.add_item(self.ItemSelect(chunk, i, session.get("selected_items") or []))
 
     async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
-        """Checks if the interacting user is allowed to control the UI."""
         session = loot_sessions.get(self.session_id)
         if not session:
             await interaction.response.send_message("❌ This loot session has expired or could not be found.", ephemeral=True)
@@ -257,96 +199,42 @@ class LootControlView(nextcord.ui.View):
 
         if interaction.user.id == session["invoker_id"]:
             return True
-            
-        if "undo_button" in interaction.data.get("custom_id", ""):
-            await interaction.response.send_message("🛡️ Only the Loot Manager can use the Undo button.", ephemeral=True)
-            return False
 
-        is_picking_turn = 0 <= session["current_turn"] < len(session["rolls"])
-        if is_picking_turn and interaction.user.id == session["rolls"][session["current_turn"]]["member"].id:
+        picker_id = session["rolls"][session["current_turn"]]["member"].id
+        if interaction.user.id == picker_id:
             return True
         
-        if is_picking_turn:
-            picker_mention = session["rolls"][session["current_turn"]]["member"].mention
-            error_message = f"🛡️ It's not your turn! Only {session['invoker'].mention} or {picker_mention} can interact."
-        else:
-            error_message = f"🛡️ Only {session['invoker'].mention} can manage participants or start the assignment."
+        picker_mention = session["rolls"][session["current_turn"]]["member"].mention
+        error_message = f"🛡️ It's not your turn! Only {session['invoker'].mention} or {picker_mention} can interact."
         await interaction.response.send_message(error_message, ephemeral=True)
         return False
-
-    async def _update_all_messages(self, interaction: nextcord.Interaction):
-        """Central hub for refreshing messages, handling session completion, and sending notifications."""
+    
+    @nextcord.ui.button(label="Assign Selected", style=nextcord.ButtonStyle.green, emoji="✅", row=1)
+    async def assign_button(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
+        await interaction.response.defer()
         session = loot_sessions.get(self.session_id)
         if not session: return
         
-        try:
-            channel = bot.get_channel(session["channel_id"])
-            loot_list_msg = await channel.fetch_message(session["loot_list_message_id"])
-            control_panel_msg = await channel.fetch_message(self.session_id)
-        except (nextcord.NotFound, nextcord.Forbidden):
-            return loot_sessions.pop(self.session_id, None)
+        selected_indices = session.get("selected_items")
+        if selected_indices:
+            picker_id = session["rolls"][session["current_turn"]]["member"].id
+            for index_str in selected_indices:
+                session["items"][int(index_str)]["assigned_to"] = picker_id
+        
+        session["selected_items"] = None
+        _advance_turn_snake(session)
+        await _update_all_messages(interaction)
 
-        # --- Handle Session Completion ---
-        if not any(not item["assigned_to"] for item in session["items"]) and session["current_turn"] != -1:
-            final_content = build_final_summary_message(session, timed_out=False)
-            await control_panel_msg.edit(content=final_content, view=None)
-            try: await loot_list_msg.delete()
-            except (nextcord.NotFound, nextcord.Forbidden): pass
-            return loot_sessions.pop(self.session_id, None)
-
-        # --- Handle Normal Update (with concurrent API calls for speed) ---
-        self.update_dynamic_components()
-        tasks = [
-            loot_list_msg.edit(content=build_loot_list_message(session)),
-            control_panel_msg.edit(content=build_control_panel_message(session), view=self)
-        ]
-
-        is_active_turn = 0 <= session["current_turn"] < len(session["rolls"])
-        if is_active_turn:
-            picker = session["rolls"][session["current_turn"]]["member"]
-            notification_content = (
-                f"🔔 **It's your turn to pick in the loot session!**\n\n"
-                f"Click here to jump back to the channel: {control_panel_msg.jump_url}\n\n"
-                "*This message will self-destruct in 30 seconds.*"
-            )
-            # Define a small coroutine to send the DM and handle errors, so it can be added to the task list.
-            async def send_dm():
-                try:
-                    await picker.send(notification_content, delete_after=30.0)
-                except (nextcord.Forbidden, nextcord.HTTPException) as e:
-                    print(f"Could not send DM to {picker.display_name}. Reason: {e}")
-            tasks.append(send_dm())
-            
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def on_timeout(self):
-        """Handles the view timing out by posting a final summary."""
+    @nextcord.ui.button(label="Skip Turn", style=nextcord.ButtonStyle.danger, row=1)
+    async def skip_button(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
+        await interaction.response.defer()
         session = loot_sessions.get(self.session_id)
         if not session: return
-        try:
-            channel = bot.get_channel(session["channel_id"])
-            if channel:
-                loot_list_msg = await channel.fetch_message(session["loot_list_message_id"])
-                control_panel_msg = await channel.fetch_message(self.session_id)
-                final_summary = build_final_summary_message(session, timed_out=True)
-                await control_panel_msg.edit(content=final_summary, view=None)
-                try: await loot_list_msg.delete()
-                except (nextcord.NotFound, nextcord.Forbidden): pass
-        except (nextcord.NotFound, nextcord.Forbidden): pass
-        finally:
-            loot_sessions.pop(self.session_id, None)
+        session["selected_items"] = None
+        _advance_turn_snake(session)
+        await _update_all_messages(interaction)
 
-    # --- Component Classes for Dynamic Addition ---
-
-    class RemoveSelect(nextcord.ui.Select):
-        def __init__(self, options):
-            super().__init__(placeholder="Select participants to remove...", options=options, custom_id="remove_select", min_values=0, max_values=len(options))
-        async def callback(self, interaction: nextcord.Interaction):
-            session = loot_sessions.get(self.view.session_id)
-            session["members_to_remove"] = self.values
-            self.view.update_dynamic_components()
-            await interaction.response.edit_message(view=self.view)
-
+    # Note: For dropdowns created dynamically, we define them as an inner class.
     class ItemSelect(nextcord.ui.Select):
         def __init__(self, chunk, chunk_index, selected_values):
             options = [
@@ -355,11 +243,11 @@ class LootControlView(nextcord.ui.View):
                     value=str(original_index), default=str(original_index) in selected_values
                 ) for original_index, item in chunk
             ]
-            placeholder = "Choose items..."
+            placeholder = "Choose one or more items to claim..."
             if len(options) > 1 and (chunk[0][1]['display_number'] != chunk[-1][1]['display_number']):
                 placeholder = f"Choose items ({chunk[0][1]['display_number']}-{chunk[-1][1]['display_number']})..."
             
-            super().__init__(placeholder=placeholder, options=options, custom_id=f"item_select_{chunk_index}", min_values=0, max_values=len(options))
+            super().__init__(placeholder=placeholder, options=options, custom_id=f"item_select_{chunk_index}", min_values=0, max_values=len(options), row=0)
         
         async def callback(self, interaction: nextcord.Interaction):
             session = loot_sessions.get(self.view.session_id)
@@ -373,86 +261,71 @@ class LootControlView(nextcord.ui.View):
             current_selection.update(self.values)
             session["selected_items"] = list(current_selection)
             
-            self.view.update_dynamic_components()
+            # Since this interaction doesn't advance the turn, we only need to update the view, not all messages.
             await interaction.response.edit_message(view=self.view)
 
-    class RemoveConfirmButton(nextcord.ui.Button):
-        def __init__(self, disabled):
-            super().__init__(label="Remove Selected", style=nextcord.ButtonStyle.danger, emoji="✖️", custom_id="remove_confirm_button", disabled=disabled)
-        async def callback(self, interaction: nextcord.Interaction):
-            await interaction.response.defer()
-            session = loot_sessions.get(self.view.session_id)
-            ids_to_remove = {int(id_str) for id_str in (session.get("members_to_remove") or [])}
-            if ids_to_remove:
-                session["rolls"] = [r for r in session["rolls"] if r["member"].id not in ids_to_remove]
-                session["members_to_remove"] = None
-            await self.view._update_all_messages(interaction)
 
-    class AssignButton(nextcord.ui.Button):
-        def __init__(self, disabled):
-            super().__init__(label="Assign Selected", style=nextcord.ButtonStyle.green, emoji="✅", custom_id="assign_button", disabled=disabled)
-        async def callback(self, interaction: nextcord.Interaction):
-            await interaction.response.defer()
-            session = loot_sessions.get(self.view.session_id)
-            selected_indices = session.get("selected_items")
-            
-            session["last_action"] = {
-                "turn": session["current_turn"], "round": session["round"],
-                "direction": session["direction"], "just_reversed": session.get("just_reversed", False),
-                "assigned_indices": [int(i) for i in selected_indices] if selected_indices else []
-            }
-            
-            if selected_indices:
-                picker_id = session["rolls"][session["current_turn"]]["member"].id
-                for index_str in selected_indices:
-                    session["items"][int(index_str)]["assigned_to"] = picker_id
-            
-            session["selected_items"] = None
-            self.view._advance_turn_snake(session)
-            await self.view._update_all_messages(interaction)
+# ===================================================================================================
+# CORE LOGIC FUNCTIONS
+# ===================================================================================================
 
-    class StartButton(nextcord.ui.Button):
-        def __init__(self):
-            super().__init__(label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="start_button")
-        async def callback(self, interaction: nextcord.Interaction):
-            await interaction.response.defer()
-            session = loot_sessions.get(self.view.session_id)
-            session.update({"members_to_remove": None, "last_action": None, "selected_items": None})
-            self.view._advance_turn_snake(session)
-            await self.view._update_all_messages(interaction)
+def _advance_turn_snake(session):
+    """Calculates the next turn in a "snake draft" order (1->N, N->1)."""
+    if not any(not item["assigned_to"] for item in session["items"]):
+        session["current_turn"] = len(session["rolls"])
+        return
 
-    class SkipButton(nextcord.ui.Button):
-        def __init__(self):
-            super().__init__(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button")
-        async def callback(self, interaction: nextcord.Interaction):
-            await interaction.response.defer()
-            session = loot_sessions.get(self.view.session_id)
-            session["last_action"] = {
-                "turn": session["current_turn"], "round": session["round"],
-                "direction": session["direction"], "just_reversed": session.get("just_reversed", False),
-                "assigned_indices": []
-            }
-            session["selected_items"] = None
-            self.view._advance_turn_snake(session)
-            await self.view._update_all_messages(interaction)
+    potential_next_turn = session["current_turn"] + session["direction"]
+    if 0 <= potential_next_turn < len(session["rolls"]):
+        session["current_turn"] = potential_next_turn
+    else:
+        session["direction"] *= -1
+        session["round"] += 1
+        session["current_turn"] += session["direction"]
 
-    class UndoButton(nextcord.ui.Button):
-        def __init__(self, disabled):
-            super().__init__(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=disabled)
-        async def callback(self, interaction: nextcord.Interaction):
-            await interaction.response.defer()
-            session = loot_sessions.get(self.view.session_id)
-            last_action = session.get("last_action")
-            if not last_action:
-                return await interaction.followup.send("❌ There is nothing to undo.", ephemeral=True)
 
-            for index in last_action.get("assigned_indices", []):
-                if index < len(session["items"]):
-                    session["items"][index]["assigned_to"] = None
-            
-            session.update({k: v for k, v in last_action.items() if k != "assigned_indices"})
-            session.update({"last_action": None, "selected_items": None})
-            await self.view._update_all_messages(interaction)
+async def _update_all_messages(interaction: nextcord.Interaction):
+    """Central hub for refreshing messages, handling session completion, and managing the UI message."""
+    session_id = interaction.message.id if interaction.message else interaction.id
+    session = loot_sessions.get(session_id)
+    if not session: return
+    
+    channel = bot.get_channel(session["channel_id"])
+    
+    # --- Clean up the previous UI message ---
+    if session.get("ui_message_id"):
+        try:
+            old_ui_msg = await channel.fetch_message(session["ui_message_id"])
+            await old_ui_msg.delete()
+        except (nextcord.NotFound, nextcord.Forbidden): pass
+        session["ui_message_id"] = None
+
+    # --- Prepare concurrent tasks for performance ---
+    tasks = []
+    try:
+        loot_list_msg = await channel.fetch_message(session["loot_list_message_id"])
+        control_panel_msg = await channel.fetch_message(session["control_panel_message_id"])
+        tasks.append(loot_list_msg.edit(content=build_loot_list_message(session)))
+        tasks.append(control_panel_msg.edit(content=build_control_panel_message(session)))
+    except (nextcord.NotFound, nextcord.Forbidden):
+        return loot_sessions.pop(session_id, None)
+
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    # --- Handle Session Completion ---
+    if not any(not item["assigned_to"] for item in session["items"]):
+        final_summary = build_final_summary_message(session, timed_out=False)
+        await control_panel_msg.edit(content=final_summary, view=None)
+        try: await loot_list_msg.delete()
+        except (nextcord.NotFound, nextcord.Forbidden): pass
+        return loot_sessions.pop(session_id, None)
+
+    # --- Create the new UI message for the current turn ---
+    picker = session["rolls"][session["current_turn"]]["member"]
+    content = f"🎁 **It is {picker.mention}'s turn to pick!**"
+    view = LootControlView(session_id)
+    new_ui_msg = await channel.send(content, view=view)
+    session["ui_message_id"] = new_ui_msg.id
 
 
 # ===================================================================================================
@@ -464,8 +337,8 @@ class LootModal(nextcord.ui.Modal):
     def __init__(self):
         super().__init__("RNGenie Loot Manager")
         self.loot_items = nextcord.ui.TextInput(
-            label="List Items Below (One Per Line) Then Submit", 
-            placeholder="Type your items here\nEach line is considered an item\nExample: 2x Health Potion", 
+            label="List Items Below (One Per Line)", 
+            placeholder="Type your items here\nExample: 2x Health Potion", 
             required=True, 
             style=nextcord.TextInputStyle.paragraph,
             max_length=1000
@@ -482,9 +355,9 @@ class LootModal(nextcord.ui.Modal):
         members_in_channel = list(interaction.user.voice.channel.members)
         
         if not members_in_channel:
-            return await interaction.followup.send("❌ I could not find anyone in your voice channel. This is likely a permissions issue.", ephemeral=True)
+            return await interaction.followup.send("❌ I could not find anyone in your voice channel.", ephemeral=True)
         if len(members_in_channel) > 20:
-            return await interaction.followup.send(f"❌ Too many users in the voice channel ({len(members_in_channel)})! The maximum is 20.", ephemeral=True)
+            return await interaction.followup.send(f"❌ Too many users in VC ({len(members_in_channel)})! Max is 20.", ephemeral=True)
 
         # --- Tie-Breaker Rolling Logic ---
         random.shuffle(members_in_channel)
@@ -527,20 +400,29 @@ class LootModal(nextcord.ui.Modal):
             return await interaction.followup.send("⚠️ You must enter at least one item.", ephemeral=True)
         
         # --- Message & Session Creation ---
-        loot_list_message = await interaction.followup.send("`Initializing Loot List (1/2)...`", wait=True)
-        control_panel_message = await interaction.channel.send("`Initializing Control Panel (2/2)...`")
-
+        loot_list_message = await interaction.followup.send("`Initializing Loot List (1/3)...`", wait=True)
+        control_panel_message = await interaction.channel.send("`Initializing Control Panel (2/3)...`")
+        
+        session_id = control_panel_message.id # Use a persistent message ID for the session key.
         session = { 
             "rolls": rolls, "items": items_data, "current_turn": -1, "invoker_id": interaction.user.id,
             "invoker": interaction.user, "selected_items": None, "round": 0, "direction": 1,
-            "just_reversed": False, "members_to_remove": None, "channel_id": interaction.channel.id,
-            "loot_list_message_id": loot_list_message.id, "last_action": None
+            "channel_id": interaction.channel.id, "loot_list_message_id": loot_list_message.id,
+            "control_panel_message_id": control_panel_message.id, "ui_message_id": None
         }
-        loot_sessions[control_panel_message.id] = session
+        loot_sessions[session_id] = session
         
-        view = LootControlView(control_panel_message.id)
-        await loot_list_message.edit(content=build_loot_list_message(session))
-        await control_panel_message.edit(content=build_control_panel_message(session), view=view)
+        # Create the initial "Start" UI message.
+        start_content = f"🎁 **Loot distribution is ready!**\n\n✍️ **Loot Manager {interaction.user.mention} can remove participants or click below to begin.**"
+        start_view = StartView(session_id)
+        ui_message = await interaction.channel.send(start_content, view=start_view)
+        session["ui_message_id"] = ui_message.id
+
+        # Perform initial edits concurrently for speed.
+        await asyncio.gather(
+            loot_list_message.edit(content=build_loot_list_message(session)),
+            control_panel_message.edit(content=build_control_panel_message(session))
+        )
 
 
 # ===================================================================================================
