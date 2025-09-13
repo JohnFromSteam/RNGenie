@@ -5,6 +5,7 @@ import os
 import traceback
 import random
 import re
+import asyncio
 from dotenv import load_dotenv
 from itertools import groupby
 import nextcord
@@ -55,6 +56,7 @@ def build_loot_list_message(session):
             f"{header}```ansi\n{ANSI_HEADER}❌ Remaining Loot Items ❌{ANSI_RESET}\n"
             f"==================================\n{remaining_body}\n==================================\n```"
         )
+    # Fallback message for when all items are gone.
     return (
         f"{header}```ansi\n{ANSI_HEADER}✅ All Items Assigned ✅{ANSI_RESET}\n"
         f"==================================\nAll items have been distributed.\n==================================\n```"
@@ -68,25 +70,23 @@ def build_control_panel_message(session):
     header = f"**(2/2)**\n\n🎉 **Loot roll started by {invoker.mention}!**\n\n"
 
     # --- Roll Order Section ---
-    roll_order_body = ""
-    for i, roll_info in enumerate(rolls, 1):
-        roll_str = f"({roll_info['roll']})"
-        if 'tiebreaker_roll' in roll_info:
-            roll_str += f" (TIE BREAKER: {roll_info['tiebreaker_roll']})"
-        roll_order_body += f"{NUMBER_EMOJIS.get(i, f'#{i}')} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET} {roll_str}\n"
-    
+    roll_order_body = "\n".join(
+        f"{NUMBER_EMOJIS.get(i, f'#{i}')} {ANSI_USER}{r['member'].display_name}{ANSI_RESET} ({r['roll']})"
+        f"{f' (TIE BREAKER: {r['tiebreaker_roll']})' if 'tiebreaker_roll' in r else ''}"
+        for i, r in enumerate(rolls, 1)
+    )
     roll_order_section = (
         f"```ansi\n{ANSI_HEADER}🔢 Roll Order 🔢{ANSI_RESET}\n==================================\n"
-        f"{roll_order_body}==================================\n```"
+        f"{roll_order_body}\n==================================\n```"
     )
 
     # --- Assigned Items Section ---
-    assigned_items_body = ""
     assigned_items_map = {roll_info["member"].id: [] for roll_info in rolls}
     for item in session["items"]:
         if item["assigned_to"]:
             assigned_items_map[item["assigned_to"]].append(item["name"])
 
+    assigned_items_body = ""
     for i, roll_info in enumerate(rolls, 1):
         if i > 1: assigned_items_body += "\n"
         assigned_items_body += f"{NUMBER_EMOJIS.get(i, f'#{i}')} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET}\n"
@@ -119,25 +119,23 @@ def build_final_summary_message(session, timed_out=False):
     header = "⌛ **The loot session has timed out!**\n\n" if timed_out else "✅ **All items have been assigned!**\n\n"
 
     # --- Final Roll Order Section ---
-    roll_order_body = ""
-    for i, roll_info in enumerate(session["rolls"], 1):
-        roll_str = f"({roll_info['roll']})"
-        if 'tiebreaker_roll' in roll_info:
-            roll_str += f" (TIE BREAKER: {roll_info['tiebreaker_roll']})"
-        roll_order_body += f"{NUMBER_EMOJIS.get(i, f'#{i}')} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET} {roll_str}\n"
-        
+    roll_order_body = "\n".join(
+        f"{NUMBER_EMOJIS.get(i, f'#{i}')} {ANSI_USER}{r['member'].display_name}{ANSI_RESET} ({r['roll']})"
+        f"{f' (TIE BREAKER: {r['tiebreaker_roll']})' if 'tiebreaker_roll' in r else ''}"
+        for i, r in enumerate(session["rolls"], 1)
+    )
     roll_order_section = (
         f"```ansi\n{ANSI_HEADER}🔢 Final Roll Order 🔢{ANSI_RESET}\n==================================\n"
-        f"{roll_order_body}==================================\n```"
+        f"{roll_order_body}\n==================================\n```"
     )
 
     # --- Final Assigned Items Section ---
-    assigned_items_body = ""
     assigned_items_map = {roll_info["member"].id: [] for roll_info in session["rolls"]}
     for item in session["items"]:
         if item["assigned_to"]:
             assigned_items_map[item["assigned_to"]].append(item["name"])
-
+    
+    assigned_items_body = ""
     for i, roll_info in enumerate(session["rolls"], 1):
         if i > 1: assigned_items_body += "\n"
         assigned_items_body += f"{NUMBER_EMOJIS.get(i, f'#{i}')} {ANSI_USER}{roll_info['member'].display_name}{ANSI_RESET}\n"
@@ -174,10 +172,21 @@ class LootControlView(nextcord.ui.View):
     def __init__(self, session_id):
         super().__init__(timeout=SESSION_TIMEOUT_SECONDS)
         self.session_id = session_id
+        self._add_static_components()
         self.update_dynamic_components()
 
+    def _add_static_components(self):
+        """Initializes all UI components once. Their visibility and state are managed dynamically."""
+        self.remove_select = self.RemoveSelect([])
+        self.remove_confirm_button = self.RemoveConfirmButton(disabled=True)
+        self.start_button = self.StartButton()
+        self.assign_button = self.AssignButton(disabled=True)
+        self.skip_button = self.SkipButton()
+        self.undo_button = self.UndoButton(disabled=True)
+        self.item_selects = []
+
     def update_dynamic_components(self):
-        """Re-generates the set of components based on the session's state."""
+        """Configures and adds the correct UI components to the view based on the session's state."""
         session = loot_sessions.get(self.session_id)
         self.clear_items()
         if not session or not any(not item["assigned_to"] for item in session["items"]): return
@@ -195,23 +204,30 @@ class LootControlView(nextcord.ui.View):
             for r in session["rolls"] if r['member'].id != session["invoker_id"]
         ]
         if member_options:
-            self.add_item(self.RemoveSelect(member_options))
+            self.remove_select.options = member_options
+            self.add_item(self.remove_select)
         
-        self.add_item(self.RemoveConfirmButton(disabled=not session.get("members_to_remove")))
-        self.add_item(self.StartButton())
+        self.remove_confirm_button.disabled = not session.get("members_to_remove")
+        self.add_item(self.remove_confirm_button)
+        self.add_item(self.start_button)
 
     def _add_active_loot_components(self, session):
         """Adds UI components for the active looting phase."""
+        self.item_selects.clear()
         available_items = [(i, item) for i, item in enumerate(session["items"]) if not item["assigned_to"]]
         if available_items:
             # Chunk items into groups of 25 for multiple dropdowns if necessary.
             for i, chunk in enumerate(available_items[i:i + 25] for i in range(0, len(available_items), 25)):
                 if chunk: # Failsafe to prevent creating a select menu with zero options.
-                    self.add_item(self.ItemSelect(chunk, i, session.get("selected_items") or []))
+                    item_select = self.ItemSelect(chunk, i, session.get("selected_items") or [])
+                    self.item_selects.append(item_select)
+                    self.add_item(item_select)
         
-        self.add_item(self.AssignButton(disabled=not session.get("selected_items")))
-        self.add_item(self.SkipButton())
-        self.add_item(self.UndoButton(disabled=not session.get("last_action")))
+        self.assign_button.disabled = not session.get("selected_items")
+        self.add_item(self.assign_button)
+        self.add_item(self.skip_button)
+        self.undo_button.disabled = not session.get("last_action")
+        self.add_item(self.undo_button)
 
     def _advance_turn_snake(self, session):
         """Calculates the next turn in a "snake draft" order (1->N, N->1)."""
@@ -270,6 +286,7 @@ class LootControlView(nextcord.ui.View):
         except (nextcord.NotFound, nextcord.Forbidden):
             return loot_sessions.pop(self.session_id, None)
 
+        # --- Handle Session Completion ---
         if not any(not item["assigned_to"] for item in session["items"]) and session["current_turn"] != -1:
             final_content = build_final_summary_message(session, timed_out=False)
             await control_panel_msg.edit(content=final_content, view=None)
@@ -277,9 +294,12 @@ class LootControlView(nextcord.ui.View):
             except (nextcord.NotFound, nextcord.Forbidden): pass
             return loot_sessions.pop(self.session_id, None)
 
+        # --- Handle Normal Update (with concurrent API calls for speed) ---
         self.update_dynamic_components()
-        await loot_list_msg.edit(content=build_loot_list_message(session))
-        await control_panel_msg.edit(content=build_control_panel_message(session), view=self)
+        tasks = [
+            loot_list_msg.edit(content=build_loot_list_message(session)),
+            control_panel_msg.edit(content=build_control_panel_message(session), view=self)
+        ]
 
         is_active_turn = 0 <= session["current_turn"] < len(session["rolls"])
         if is_active_turn:
@@ -289,11 +309,16 @@ class LootControlView(nextcord.ui.View):
                 f"Click here to jump back to the channel: {control_panel_msg.jump_url}\n\n"
                 "*This message will self-destruct in 30 seconds.*"
             )
-            try:
-                await picker.send(notification_content, delete_after=30.0)
-            except (nextcord.Forbidden, nextcord.HTTPException) as e:
-                print(f"Could not send DM to {picker.display_name}. Reason: {e}")
+            # Define a small coroutine to send the DM and handle errors, so it can be added to the task list.
+            async def send_dm():
+                try:
+                    await picker.send(notification_content, delete_after=30.0)
+                except (nextcord.Forbidden, nextcord.HTTPException) as e:
+                    print(f"Could not send DM to {picker.display_name}. Reason: {e}")
+            tasks.append(send_dm())
             
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def on_timeout(self):
         """Handles the view timing out by posting a final summary."""
         session = loot_sessions.get(self.session_id)
