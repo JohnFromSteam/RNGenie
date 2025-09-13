@@ -212,154 +212,154 @@ class ItemDropdownView(nextcord.ui.View):
         self.session_id = session_id
         self.populate()
 
-def populate(self):
-    self.clear_items()
-    session = loot_sessions.get(self.session_id)
-    if not session:
-        return
-
-    # Pre-start: manage participants
-    if session["current_turn"] == -1:
-        selected_values = session.get("members_to_remove") or []
-        member_options = []
-        invoker_id = session["invoker_id"]
-        for r in session["rolls"]:
-            if r["member"].id != invoker_id:
-                is_selected = str(r['member'].id) in selected_values
-                member_options.append(nextcord.SelectOption(label=r['member'].display_name, value=str(r['member'].id), default=is_selected))
-        if member_options:
-            self.add_item(nextcord.ui.Select(placeholder="Select participants to remove...", options=member_options, custom_id="remove_select", min_values=0, max_values=len(member_options)))
-        remove_disabled = not session.get("members_to_remove")
-        self.add_item(nextcord.ui.Button(label="Remove Selected", style=nextcord.ButtonStyle.danger, emoji="✖️", custom_id="remove_confirm_button", disabled=remove_disabled))
-        self.add_item(nextcord.ui.Button(label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="start_button"))
-
-    else:
-        pass
-
-    # attach callbacks
-    for child in self.children:
-        if hasattr(child, "custom_id"):
-            if child.custom_id == "remove_select":
-                child.callback = self.on_remove_select
-            if child.custom_id == "remove_confirm_button":
-                child.callback = self.on_remove_confirm
-            if child.custom_id == "start_button":
-                child.callback = self.on_start
-            if child.custom_id == "undo_button":
-                child.callback = self.on_undo
-
-    async def on_item_select(self, interaction: nextcord.Interaction):
+    def populate(self):
+        self.clear_items()
         session = loot_sessions.get(self.session_id)
         if not session:
-            await interaction.response.send_message("Session expired.", ephemeral=True)
             return
 
-        dropdown_id = interaction.data["custom_id"]
-        dropdown_index = int(dropdown_id.split("_")[-1])
-        available_items = [(index, item) for index, item in enumerate(session["items"]) if not item["assigned_to"]]
-        item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
+        # Pre-start: manage participants
+        if session["current_turn"] == -1:
+            selected_values = session.get("members_to_remove") or []
+            member_options = []
+            invoker_id = session["invoker_id"]
+            for r in session["rolls"]:
+                if r["member"].id != invoker_id:
+                    is_selected = str(r['member'].id) in selected_values
+                    member_options.append(nextcord.SelectOption(label=r['member'].display_name, value=str(r['member'].id), default=is_selected))
+            if member_options:
+                self.add_item(nextcord.ui.Select(placeholder="Select participants to remove...", options=member_options, custom_id="remove_select", min_values=0, max_values=len(member_options)))
+            remove_disabled = not session.get("members_to_remove")
+            self.add_item(nextcord.ui.Button(label="Remove Selected", style=nextcord.ButtonStyle.danger, emoji="✖️", custom_id="remove_confirm_button", disabled=remove_disabled))
+            self.add_item(nextcord.ui.Button(label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="start_button"))
 
-        if dropdown_index >= len(item_chunks):
-            await interaction.response.send_message("Invalid selection (stale dropdown).", ephemeral=True)
-            return
+        else:
+            pass
 
-        possible_values = {str(index) for index, _ in item_chunks[dropdown_index]}
-        newly_selected = set(interaction.data.get("values", []))
-        current_master = set(session.get("selected_items") or [])
-        # replace values belonging to this dropdown
-        current_master -= possible_values
-        current_master |= newly_selected
-        session["selected_items"] = list(current_master)
+        # attach callbacks
+        for child in self.children:
+            if hasattr(child, "custom_id"):
+                if child.custom_id == "remove_select":
+                    child.callback = self.on_remove_select
+                if child.custom_id == "remove_confirm_button":
+                    child.callback = self.on_remove_confirm
+                if child.custom_id == "start_button":
+                    child.callback = self.on_start
+                if child.custom_id == "undo_button":
+                    child.callback = self.on_undo
 
-        # Do NOT delete/recreate the third message on mere selection; just edit it in-place.
-        await _refresh_all_messages(self.session_id, interaction)
+        async def on_item_select(self, interaction: nextcord.Interaction):
+            session = loot_sessions.get(self.session_id)
+            if not session:
+                await interaction.response.send_message("Session expired.", ephemeral=True)
+                return
 
-    async def on_assign(self, interaction: nextcord.Interaction):
-        session = loot_sessions.get(self.session_id)
-        if not session:
-            await interaction.response.send_message("Session expired.", ephemeral=True)
-            return
+            dropdown_id = interaction.data["custom_id"]
+            dropdown_index = int(dropdown_id.split("_")[-1])
+            available_items = [(index, item) for index, item in enumerate(session["items"]) if not item["assigned_to"]]
+            item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
 
-        if session["current_turn"] < 0 or session["current_turn"] >= len(session["rolls"]):
-            await interaction.response.send_message("It's not an active picking turn.", ephemeral=True)
-            return
+            if dropdown_index >= len(item_chunks):
+                await interaction.response.send_message("Invalid selection (stale dropdown).", ephemeral=True)
+                return
 
-        selected_indices = session.get("selected_items") or []
-        current_picker_id = session["rolls"][session["current_turn"]]["member"].id
+            possible_values = {str(index) for index, _ in item_chunks[dropdown_index]}
+            newly_selected = set(interaction.data.get("values", []))
+            current_master = set(session.get("selected_items") or [])
+            # replace values belonging to this dropdown
+            current_master -= possible_values
+            current_master |= newly_selected
+            session["selected_items"] = list(current_master)
 
-        # record last action for undo
-        session["last_action"] = {
-            "turn": session["current_turn"],
-            "round": session["round"],
-            "direction": session["direction"],
-            "just_reversed": session.get("just_reversed", False),
-            "assigned_indices": [int(i) for i in selected_indices] if selected_indices else []
-        }
+            # Do NOT delete/recreate the third message on mere selection; just edit it in-place.
+            await _refresh_all_messages(self.session_id, interaction)
 
-        if selected_indices:
-            for idx_str in selected_indices:
-                idx = int(idx_str)
-                if 0 <= idx < len(session["items"]):
-                    session["items"][idx]["assigned_to"] = current_picker_id
+        async def on_assign(self, interaction: nextcord.Interaction):
+            session = loot_sessions.get(self.session_id)
+            if not session:
+                await interaction.response.send_message("Session expired.", ephemeral=True)
+                return
 
-        session["selected_items"] = None
-        _advance_turn_snake(session)
-        await _refresh_all_messages(self.session_id, interaction)
+            if session["current_turn"] < 0 or session["current_turn"] >= len(session["rolls"]):
+                await interaction.response.send_message("It's not an active picking turn.", ephemeral=True)
+                return
 
-    async def on_skip(self, interaction: nextcord.Interaction):
-        session = loot_sessions.get(self.session_id)
-        if not session:
-            await interaction.response.send_message("Session expired.", ephemeral=True)
-            return
+            selected_indices = session.get("selected_items") or []
+            current_picker_id = session["rolls"][session["current_turn"]]["member"].id
 
-        if session["current_turn"] != -1:
+            # record last action for undo
             session["last_action"] = {
                 "turn": session["current_turn"],
                 "round": session["round"],
                 "direction": session["direction"],
                 "just_reversed": session.get("just_reversed", False),
-                "assigned_indices": []
+                "assigned_indices": [int(i) for i in selected_indices] if selected_indices else []
             }
 
-        session["selected_items"] = None
-        if session["current_turn"] == -1:
-            session["members_to_remove"] = None
+            if selected_indices:
+                for idx_str in selected_indices:
+                    idx = int(idx_str)
+                    if 0 <= idx < len(session["items"]):
+                        session["items"][idx]["assigned_to"] = current_picker_id
+
+            session["selected_items"] = None
+            _advance_turn_snake(session)
+            await _refresh_all_messages(self.session_id, interaction)
+
+        async def on_skip(self, interaction: nextcord.Interaction):
+            session = loot_sessions.get(self.session_id)
+            if not session:
+                await interaction.response.send_message("Session expired.", ephemeral=True)
+                return
+
+            if session["current_turn"] != -1:
+                session["last_action"] = {
+                    "turn": session["current_turn"],
+                    "round": session["round"],
+                    "direction": session["direction"],
+                    "just_reversed": session.get("just_reversed", False),
+                    "assigned_indices": []
+                }
+
+            session["selected_items"] = None
+            if session["current_turn"] == -1:
+                session["members_to_remove"] = None
+                session["last_action"] = None
+
+            _advance_turn_snake(session)
+            await _refresh_all_messages(self.session_id, interaction)
+
+        async def on_undo(self, interaction: nextcord.Interaction):
+            """Undo button placed next to Skip Turn. Only Loot Manager (invoker) allowed."""
+            session = loot_sessions.get(self.session_id)
+            if not session:
+                await interaction.response.send_message("Session expired.", ephemeral=True)
+                return
+
+            # permission check
+            if interaction.user.id != session["invoker_id"]:
+                await interaction.response.send_message("🛡️ Only the Loot Manager can use Undo.", ephemeral=True)
+                return
+
+            last_action = session.get("last_action")
+            if not last_action:
+                await interaction.response.send_message("❌ There is nothing to undo.", ephemeral=True)
+                return
+
+            indices_to_unassign = last_action.get("assigned_indices", [])
+            for idx in indices_to_unassign:
+                if 0 <= idx < len(session["items"]):
+                    session["items"][idx]["assigned_to"] = None
+
+            session["current_turn"] = last_action["turn"]
+            session["round"] = last_action["round"]
+            session["direction"] = last_action["direction"]
+            session["just_reversed"] = last_action.get("just_reversed", False)
+
             session["last_action"] = None
+            session["selected_items"] = None
 
-        _advance_turn_snake(session)
-        await _refresh_all_messages(self.session_id, interaction)
-
-    async def on_undo(self, interaction: nextcord.Interaction):
-        """Undo button placed next to Skip Turn. Only Loot Manager (invoker) allowed."""
-        session = loot_sessions.get(self.session_id)
-        if not session:
-            await interaction.response.send_message("Session expired.", ephemeral=True)
-            return
-
-        # permission check
-        if interaction.user.id != session["invoker_id"]:
-            await interaction.response.send_message("🛡️ Only the Loot Manager can use Undo.", ephemeral=True)
-            return
-
-        last_action = session.get("last_action")
-        if not last_action:
-            await interaction.response.send_message("❌ There is nothing to undo.", ephemeral=True)
-            return
-
-        indices_to_unassign = last_action.get("assigned_indices", [])
-        for idx in indices_to_unassign:
-            if 0 <= idx < len(session["items"]):
-                session["items"][idx]["assigned_to"] = None
-
-        session["current_turn"] = last_action["turn"]
-        session["round"] = last_action["round"]
-        session["direction"] = last_action["direction"]
-        session["just_reversed"] = last_action.get("just_reversed", False)
-
-        session["last_action"] = None
-        session["selected_items"] = None
-
-        await _refresh_all_messages(self.session_id, interaction)
+            await _refresh_all_messages(self.session_id, interaction)
 
 
 # ===================================================================================================
