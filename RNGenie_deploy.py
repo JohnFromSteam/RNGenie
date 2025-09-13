@@ -156,7 +156,7 @@ def build_control_panel_message(session):
         indicator = (
             f"\n🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
             f"**{picker_emoji} {picker.mention}'s {turn_text}**\n\n"
-            f"✍️ **Loot Manager:** {invoker.mention}"
+            f"✍️ **Loot Manager:** {invoker.mention}\n"
         )
     else:
         indicator = f"\n🎁 **Loot distribution is ready!**\n\n✍️ **Loot Manager {invoker.mention} can remove participants or click below to begin.**"
@@ -282,7 +282,7 @@ class ItemDropdownView(nextcord.ui.View):
         current_master |= newly_selected
         session["selected_items"] = list(current_master)
 
-        await _refresh_all_messages(self.session_id, interaction)
+        await _refresh_all_messages(self.session_id, interaction, delete_item=False)
 
     async def on_assign(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
@@ -474,10 +474,11 @@ class ControlPanelView(nextcord.ui.View):
 # MESSAGE REFRESH / LIFECYCLE
 # ===================================================================================================
 
-async def _refresh_all_messages(session_id, interaction=None):
+async def _refresh_all_messages(session_id, interaction=None, delete_item=True):
     """Centralized message update: control panel, loot list, and item dropdown.
-       Only creates the item-dropdown message when the session is active (picker's turn).
-       Deletes any old item message each refresh so it 'self-deletes on next turn' when recreated."""
+       Only creates/deletes the item-dropdown message when delete_item=True.
+       If delete_item is False, attempt to edit the existing third message in-place
+       (keeps user selections smooth when they just clicked a dropdown)."""
     session = loot_sessions.get(session_id)
     if not session:
         if interaction and not interaction.is_expired():
@@ -502,9 +503,9 @@ async def _refresh_all_messages(session_id, interaction=None):
     except (nextcord.NotFound, nextcord.Forbidden):
         loot_list_msg = None
 
-    # delete existing item-dropdown message if present (we'll recreate conditionally)
+    # delete existing item-dropdown message only if delete_item is True
     old_item_msg_id = session.get("item_dropdown_message_id")
-    if old_item_msg_id:
+    if delete_item and old_item_msg_id:
         try:
             old_item_msg = await channel.fetch_message(old_item_msg_id)
             await old_item_msg.delete()
@@ -536,20 +537,33 @@ async def _refresh_all_messages(session_id, interaction=None):
     is_active_pick = (0 <= session["current_turn"] < len(session["rolls"])) and _are_items_left(session)
     if not is_active_pick:
         # We're in pre-start or no active picker; do NOT create the item-dropdown message.
-        session["item_dropdown_message_id"] = None
+        # If delete_item was False we still might want to clear item id to be safe.
+        if delete_item:
+            session["item_dropdown_message_id"] = None
         return
 
     # Create the item-dropdown message appropriate for an active picker's turn:
     invoker = session["invoker"]
     picker = session["rolls"][session["current_turn"]]["member"]
     item_message_content = (
-        f"🎁 **Loot distribution is live!**\n\n"
-        f"✍️ **Loot Manager {invoker.mention} — {picker.mention} it is your turn.**\n\n"
-        "Choose items below (if it is your turn)."
+        f"✍️ **{picker.mention} it is your turn!**\n\n"
+        "Choose items below..."
     )
 
-    # Build the view and send it; store message id so it can be deleted on next refresh/turn.
     item_view = ItemDropdownView(session_id)
+
+    # If delete_item is False, attempt to edit the existing item message in-place.
+    existing_id = session.get("item_dropdown_message_id")
+    if not delete_item and existing_id:
+        try:
+            existing_msg = await channel.fetch_message(existing_id)
+            await existing_msg.edit(content=item_message_content, view=item_view)
+            return
+        except (nextcord.NotFound, nextcord.Forbidden):
+            # If fetch/edit fails, fall through and create a new message.
+            session["item_dropdown_message_id"] = None
+
+    # Otherwise (delete_item True or no existing message), create a fresh message.
     item_msg = await channel.send(item_message_content, view=item_view)
     session["item_dropdown_message_id"] = item_msg.id
 
