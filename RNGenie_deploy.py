@@ -27,7 +27,8 @@ loot_sessions = {}
 # Per-session locks to avoid race conditions
 session_locks = {}
 
-SESSION_TIMEOUT_SECONDS = 1800  # 30 minutes
+# Inactivity timeout: 10 minutes
+SESSION_TIMEOUT_SECONDS = 600  # 10 minutes
 
 NUMBER_EMOJIS = {
     1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣",
@@ -172,13 +173,8 @@ def build_control_panel_message(session):
     # Turn indicator
     indicator = ""
     if session["current_turn"] >= 0 and session["current_turn"] < len(rolls):
-        picker = rolls[session["current_turn"]]["member"]
         direction_text = "Normal" if session["direction"] == 1 else "Reverse"
-        picker_emoji = NUMBER_EMOJIS.get(session['current_turn'] + 1, "👉")
-        turn_text = "turn!" if not session.get("just_reversed", False) else "turn (direction reversed)!"
-        indicator = (
-            f"\n🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
-        )
+        indicator = f"\n🔔 **Round {session['round'] + 1}** ({direction_text})\n\n"
     else:
         indicator = f"\n🎁 **Loot distribution is ready!**\n\n✍️ **Loot Manager {invoker.mention} can remove participants or click below to begin.**"
 
@@ -229,6 +225,7 @@ class ItemDropdownView(nextcord.ui.View):
     """View attached to the 3rd message that contains item-selects + assign/skip/undo actions.
        This view is recreated when the turn advances, but selection updates edit the existing message in-place."""
     def __init__(self, session_id):
+        # no view timeout (session-level timeout is handled separately)
         super().__init__(timeout=None)
         self.session_id = session_id
         # populate so any view attached immediately has the components
@@ -243,7 +240,6 @@ class ItemDropdownView(nextcord.ui.View):
 
         # If no items left, nothing to add
         if not _are_items_left(session):
-            # still provide Skip/Undo if desired? we just return here.
             return
 
         # Only add selects when it's a picker's active turn
@@ -265,16 +261,17 @@ class ItemDropdownView(nextcord.ui.View):
                 if len(item_chunks) > 1:
                     start_num, end_num = chunk[0][1]['display_number'], chunk[-1][1]['display_number']
                     placeholder = f"Choose items ({start_num}-{end_num})..."
+                # Note: max_values=len(options) allows multi-select up to chunk size
                 self.add_item(nextcord.ui.Select(placeholder=placeholder, options=options, custom_id=f"item_select_{i}", min_values=0, max_values=len(options)))
 
             assign_disabled = not session.get("selected_items")
             # use ButtonStyle.success (green equivalent)
             self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.success, emoji="✅", custom_id="assign_button", disabled=assign_disabled))
 
-        # Skip Turn is shown regardless (keeps parity with your template)
+        # Skip Turn is shown regardless
         self.add_item(nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button"))
 
-        # Add Undo next to Skip Turn: only enabled when there's something to undo.
+        # Undo is present next to Skip Turn (only one Undo, here)
         undo_disabled = not session.get("last_action")
         self.add_item(nextcord.ui.Button(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=undo_disabled))
 
@@ -291,23 +288,31 @@ class ItemDropdownView(nextcord.ui.View):
                     child.callback = self.on_item_select
 
     async def on_item_select(self, interaction: nextcord.Interaction):
+        """
+        Called when a user interacts with any of the Select components.
+        Behavior:
+         - validate the dropdown id / values
+         - update session['selected_items'] under the session lock
+         - ACK the component immediately with defer_update() (this collapses the dropdown in the client)
+         - fetch & edit the item message to show the updated view (best-effort)
+         - refresh control/loot list messages (non-interaction path)
+        """
         session = loot_sessions.get(self.session_id)
         if not session:
             await interaction.response.send_message("Session expired.", ephemeral=True)
             return
 
-        # validate custom_id and dropdown index
         dropdown_id = interaction.data.get("custom_id")
         if dropdown_id is None:
             await interaction.response.send_message("Invalid interaction.", ephemeral=True)
             return
+
         try:
             dropdown_index = int(dropdown_id.split("_")[-1])
         except Exception:
             await interaction.response.send_message("Invalid selection (malformed dropdown id).", ephemeral=True)
             return
 
-        # compute currently available (unassigned) items and chunking
         available_items = [(index, item) for index, item in enumerate(session["items"]) if not item["assigned_to"]]
         item_chunks = [available_items[i:i + 25] for i in range(0, len(available_items), 25)]
 
@@ -327,8 +332,7 @@ class ItemDropdownView(nextcord.ui.View):
             current_master |= newly_selected
             session["selected_items"] = list(current_master)
 
-        # Build a new view/content for the item message so we can ACK the select and collapse the dropdown.
-        # This does NOT perform assignment — just updates the UI.
+        # Prepare updated view/content (so edit reflects current selection)
         if 0 <= session["current_turn"] < len(session["rolls"]):
             picker = session["rolls"][session["current_turn"]]["member"]
             picker_emoji = NUMBER_EMOJIS.get(session['current_turn'] + 1, "👉")
@@ -337,31 +341,32 @@ class ItemDropdownView(nextcord.ui.View):
         else:
             item_message_content = "Choose items below..."
 
-        # Build view that reflects the current selection (so when user re-opens the select they'll see their choices).
         item_view = ItemDropdownView(self.session_id)
 
-        # ACK the select by editing the item-message — this collapses the dropdown in the client's UI immediately.
+        # ACK the select immediately to collapse the dropdown in the client's UI.
+        # Use defer_update() as the reliable ACK; then do a best-effort fetch+edit of the message to show the updated view.
         try:
-            await interaction.response.edit_message(content=item_message_content, view=item_view)
+            await interaction.response.defer_update()
         except Exception:
-            # If editing via interaction fails, try to acknowledge the component interaction
-            # using defer_update() and then edit the message via a fetch (best-effort).
+            # if we can't defer, fall back to trying to edit via interaction (some clients/platforms allow it)
             try:
-                await interaction.response.defer_update()
+                await interaction.response.edit_message(content=item_message_content, view=item_view)
             except Exception:
+                # last-resort: continue — we'll try fetch+edit below
                 pass
 
-            # best-effort: try to fetch & edit the message directly (works when interaction token is exhausted)
-            try:
-                ch = interaction.channel or bot.get_channel(session["channel_id"])
-                if ch and session.get("item_dropdown_message_id"):
-                    msg = await ch.fetch_message(session["item_dropdown_message_id"])
-                    await msg.edit(content=item_message_content, view=item_view)
-            except Exception:
-                pass
+        # Best-effort fetch & edit the item message so clients immediately see the new view when they open again.
+        try:
+            ch = interaction.channel or bot.get_channel(session["channel_id"])
+            msg_id = session.get("item_dropdown_message_id")
+            if ch and msg_id:
+                msg = await ch.fetch_message(msg_id)
+                await msg.edit(content=item_message_content, view=item_view)
+        except Exception:
+            # ignore fetch/edit failures — refresh below will update messages normally
+            pass
 
-        # Now refresh other messages (control panel / loot list).
-        # Pass interaction=None so the refresh function will not attempt to call interaction.response again.
+        # Now refresh other messages (control panel / loot list) without touching interaction.response.
         await _refresh_all_messages(self.session_id, interaction=None, delete_item=False)
 
     async def on_assign(self, interaction: nextcord.Interaction):
@@ -445,7 +450,8 @@ class ItemDropdownView(nextcord.ui.View):
 # ===================================================================================================
 
 class ControlPanelView(nextcord.ui.View):
-    """View for the control panel (message 2/2). Contains participant remove select + manager actions + undo."""
+    """View for the control panel (message 2/2). Contains participant remove select + manager actions.
+       Note: Undo button has been removed from this control panel; it exists only next to Skip Turn."""
     def __init__(self, session_id):
         super().__init__(timeout=None)
         self.session_id = session_id
@@ -472,9 +478,9 @@ class ControlPanelView(nextcord.ui.View):
             self.add_item(nextcord.ui.Button(label="Remove Selected", style=nextcord.ButtonStyle.danger, emoji="✖️", custom_id="remove_confirm_button", disabled=remove_disabled))
             self.add_item(nextcord.ui.Button(label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="start_button"))
         else:
-            # Post-start: allow undo (invoker only) and a terse control hint in the panel.
-            undo_disabled = not session.get("last_action")
-            self.add_item(nextcord.ui.Button(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=undo_disabled))
+            # Post-start: no Undo here (Undo is next to Skip Turn in the item dropdown message)
+            # keep a terse control hint in the panel
+            pass
 
         # attach callbacks
         for child in self.children:
@@ -485,8 +491,6 @@ class ControlPanelView(nextcord.ui.View):
                     child.callback = self.on_remove_confirm
                 if child.custom_id == "start_button":
                     child.callback = self.on_start
-                if child.custom_id == "undo_button":
-                    child.callback = self.on_undo
 
     async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
         session = loot_sessions.get(self.session_id)
@@ -494,15 +498,7 @@ class ControlPanelView(nextcord.ui.View):
             await interaction.response.send_message("❌ This loot session has expired or could not be found.", ephemeral=True)
             return False
 
-        # Undo restricted to invoker
-        if interaction.data.get("custom_id") == "undo_button":
-            if interaction.user.id == session["invoker_id"]:
-                return True
-            else:
-                await interaction.response.send_message("🛡️ Only the Loot Manager can use Undo.", ephemeral=True)
-                return False
-
-        # Invoker always allowed
+        # Invoker always allowed to use control-panel actions
         if interaction.user.id == session["invoker_id"]:
             return True
 
@@ -542,20 +538,6 @@ class ControlPanelView(nextcord.ui.View):
         session["last_action"] = None
         _advance_turn_snake(session)
         await _refresh_all_messages(self.session_id, interaction)
-
-    async def on_undo(self, interaction: nextcord.Interaction):
-        session = loot_sessions.get(self.session_id)
-        if not session:
-            await interaction.response.send_message("Session expired.", ephemeral=True)
-            return
-        if interaction.user.id != session["invoker_id"]:
-            await interaction.response.send_message("🛡️ Only the Loot Manager can use Undo.", ephemeral=True)
-            return
-
-        if not await _undo_last_action(session, interaction):
-            return
-
-        await _refresh_all_messages(self.session_id, interaction, delete_item=True)
 
 # ===================================================================================================
 # MESSAGE REFRESH / LIFECYCLE
