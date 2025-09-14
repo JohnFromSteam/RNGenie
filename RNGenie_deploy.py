@@ -293,8 +293,9 @@ class ItemDropdownView(nextcord.ui.View):
         Behavior:
          - validate the dropdown id / values
          - update session['selected_items'] under the session lock
-         - ACK the component immediately with defer_update() (this collapses the dropdown in the client)
-         - fetch & edit the item message to show the updated view (best-effort)
+         - ACK the component immediately by editing the message via interaction.response.edit_message(...) if possible
+           (this reliably collapses the dropdown in desktop clients)
+         - if direct edit fails, fall back to defer_update() + fetch+edit
          - refresh control/loot list messages (non-interaction path)
         """
         session = loot_sessions.get(self.session_id)
@@ -306,7 +307,6 @@ class ItemDropdownView(nextcord.ui.View):
         if dropdown_id is None:
             await interaction.response.send_message("Invalid interaction.", ephemeral=True)
             return
-
         try:
             dropdown_index = int(dropdown_id.split("_")[-1])
         except Exception:
@@ -343,28 +343,32 @@ class ItemDropdownView(nextcord.ui.View):
 
         item_view = ItemDropdownView(self.session_id)
 
-        # ACK the select immediately to collapse the dropdown in the client's UI.
-        # Use defer_update() as the reliable ACK; then do a best-effort fetch+edit of the message to show the updated view.
+        # Primary approach: edit message via interaction response (this collapses the dropdown on desktop reliably)
+        edited_via_interaction = False
         try:
-            await interaction.response.defer_update()
+            await interaction.response.edit_message(content=item_message_content, view=item_view)
+            edited_via_interaction = True
         except Exception:
-            # if we can't defer, fall back to trying to edit via interaction (some clients/platforms allow it)
+            # If direct edit failed (maybe response already used), fall back to defer_update() then fetch+edit
             try:
-                await interaction.response.edit_message(content=item_message_content, view=item_view)
+                await interaction.response.defer_update()
             except Exception:
-                # last-resort: continue — we'll try fetch+edit below
                 pass
 
-        # Best-effort fetch & edit the item message so clients immediately see the new view when they open again.
-        try:
-            ch = interaction.channel or bot.get_channel(session["channel_id"])
-            msg_id = session.get("item_dropdown_message_id")
-            if ch and msg_id:
-                msg = await ch.fetch_message(msg_id)
-                await msg.edit(content=item_message_content, view=item_view)
-        except Exception:
-            # ignore fetch/edit failures — refresh below will update messages normally
-            pass
+        if not edited_via_interaction:
+            # Best-effort fetch & edit the item message so clients immediately see the new view when they open again.
+            try:
+                ch = interaction.channel or bot.get_channel(session["channel_id"])
+                msg_id = session.get("item_dropdown_message_id")
+                if ch and msg_id:
+                    msg = await ch.fetch_message(msg_id)
+                    await msg.edit(content=item_message_content, view=item_view)
+            except Exception:
+                # ignore fetch/edit failures — refresh below will update messages normally
+                pass
+
+        # Refresh session timeout (activity)
+        await _reset_session_timeout(session_id=self.session_id)
 
         # Now refresh other messages (control panel / loot list) without touching interaction.response.
         await _refresh_all_messages(self.session_id, interaction=None, delete_item=False)
@@ -400,6 +404,10 @@ class ItemDropdownView(nextcord.ui.View):
 
         session["selected_items"] = None
         _advance_turn_snake(session)
+
+        # refresh session timeout (activity)
+        await _reset_session_timeout(session_id=self.session_id)
+
         # assignment is a turn-advance: allow delete+recreate
         await _refresh_all_messages(self.session_id, interaction, delete_item=True)
 
@@ -425,6 +433,10 @@ class ItemDropdownView(nextcord.ui.View):
             session["last_action"] = None
 
         _advance_turn_snake(session)
+
+        # refresh session timeout (activity)
+        await _reset_session_timeout(session_id=self.session_id)
+
         # skipping advances turn: delete+recreate the item message
         await _refresh_all_messages(self.session_id, interaction, delete_item=True)
 
@@ -441,6 +453,9 @@ class ItemDropdownView(nextcord.ui.View):
 
         if not await _undo_last_action(session, interaction):
             return
+
+        # refresh session timeout (activity)
+        await _reset_session_timeout(session_id=self.session_id)
 
         # Undo changes the session state: delete+recreate the item message to reflect restored turn.
         await _refresh_all_messages(self.session_id, interaction, delete_item=True)
@@ -525,6 +540,10 @@ class ControlPanelView(nextcord.ui.View):
         if ids_to_remove:
             session["rolls"] = [r for r in session["rolls"] if r["member"].id not in ids_to_remove]
             session["members_to_remove"] = None
+
+        # refresh session timeout (activity)
+        await _reset_session_timeout(session_id=self.session_id)
+
         await _refresh_all_messages(self.session_id, interaction)
 
     async def on_start(self, interaction: nextcord.Interaction):
@@ -537,13 +556,42 @@ class ControlPanelView(nextcord.ui.View):
         session["selected_items"] = None
         session["last_action"] = None
         _advance_turn_snake(session)
+
+        # refresh session timeout (activity)
+        await _reset_session_timeout(session_id=self.session_id)
+
         await _refresh_all_messages(self.session_id, interaction)
 
 # ===================================================================================================
 # MESSAGE REFRESH / LIFECYCLE
 # ====================================================================================================
 
+async def _reset_session_timeout(session_id: int):
+    """
+    Cancel existing timeout task for session and start a fresh one.
+    Called on user activity so timeout is inactivity-based.
+    """
+    session = loot_sessions.get(session_id)
+    if not session:
+        return
+    old_task = session.get("timeout_task")
+    if old_task:
+        try:
+            old_task.cancel()
+        except Exception:
+            pass
+    # create new one
+    task = asyncio.create_task(_schedule_session_timeout(session_id))
+    session["timeout_task"] = task
+
 async def _refresh_all_messages(session_id, interaction=None, delete_item=True):
+    """
+    Centralized message update: control panel, loot list, and item dropdown.
+    Optimizations:
+      - Skip edits if content hasn't changed (reduces API calls).
+      - Use partial message edits where possible.
+      - Reset inactivity timeout on activity.
+    """
     session = loot_sessions.get(session_id)
     if not session:
         if interaction and not interaction.is_expired():
@@ -554,8 +602,14 @@ async def _refresh_all_messages(session_id, interaction=None, delete_item=True):
     async with lock:
         channel = bot.get_channel(session["channel_id"])
         if not channel:
+            # cleanup
             loot_sessions.pop(session_id, None)
-            # ensure lock removed
+            t = session.get("timeout_task")
+            if t:
+                try:
+                    t.cancel()
+                except Exception:
+                    pass
             session_locks.pop(session_id, None)
             return
 
@@ -584,46 +638,65 @@ async def _refresh_all_messages(session_id, interaction=None, delete_item=True):
                     await loot_list_msg.delete()
                 except (nextcord.NotFound, nextcord.Forbidden):
                     pass
+            # cleanup
+            t = session.get("timeout_task")
+            if t:
+                try:
+                    t.cancel()
+                except Exception:
+                    pass
             loot_sessions.pop(session_id, None)
             session_locks.pop(session_id, None)
             return
 
+        # Build contents
         loot_list_content = build_loot_list_message(session)
         control_panel_content = build_control_panel_message(session)
-        control_view = ControlPanelView(session_id)
+
+        # Edit only if content changed (reduces API calls)
+        last_control = session.get("last_control_content")
+        last_loot = session.get("last_loot_content")
 
         async def update_control():
-            try:
-                await control_panel_msg.edit(content=control_panel_content, view=control_view)
-            except (nextcord.NotFound, nextcord.Forbidden):
-                pass
-
-        async def update_loot():
-            if loot_list_msg:
+            nonlocal last_control
+            if control_panel_content != last_control:
                 try:
-                    await loot_list_msg.edit(content=loot_list_content)
+                    await control_panel_msg.edit(content=control_panel_content, view=ControlPanelView(session_id))
+                    session["last_control_content"] = control_panel_content
                 except (nextcord.NotFound, nextcord.Forbidden):
                     pass
 
+        async def update_loot():
+            nonlocal last_loot
+            if loot_list_msg and loot_list_content != last_loot:
+                try:
+                    await loot_list_msg.edit(content=loot_list_content)
+                    session["last_loot_content"] = loot_list_content
+                except (nextcord.NotFound, nextcord.Forbidden):
+                    pass
+
+        # Run edits concurrently
         await asyncio.gather(update_control(), update_loot())
 
-        is_active_pick = (
-            0 <= session["current_turn"] < len(session["rolls"])
-            and _are_items_left(session)
-        )
+        # refresh session timeout (activity)
+        await _reset_session_timeout(session_id=session_id)
+
+        # ---- Only create item-dropdown if active
+        is_active_pick = (0 <= session["current_turn"] < len(session["rolls"])) and _are_items_left(session)
         if not is_active_pick:
             if delete_item:
                 session["item_dropdown_message_id"] = None
             return
 
         picker = session["rolls"][session["current_turn"]]["member"]
-        picker_emoji = NUMBER_EMOJIS.get(session["current_turn"] + 1, "👉")
+        picker_emoji = NUMBER_EMOJIS.get(session['current_turn'] + 1, "👉")
         turn_text = "turn!" if not session.get("just_reversed", False) else "turn (direction reversed)!"
 
         item_message_content = (
             f"**{picker_emoji} {picker.mention}'s {turn_text}**\n\n"
             "Choose items below..."
         )
+        # Create the view only when we are going to attach/send it
         item_view = ItemDropdownView(session_id)
 
         existing_id = session.get("item_dropdown_message_id")
@@ -635,6 +708,7 @@ async def _refresh_all_messages(session_id, interaction=None, delete_item=True):
             except (nextcord.NotFound, nextcord.Forbidden):
                 session["item_dropdown_message_id"] = None
 
+        # create new dropdown message (fast path)
         item_msg = await channel.send(item_message_content, view=item_view)
         session["item_dropdown_message_id"] = item_msg.id
 
@@ -642,16 +716,23 @@ async def _refresh_all_messages(session_id, interaction=None, delete_item=True):
 # TIMEOUT CLEANUP TASK
 # ===================================================================================================
 
-async def _schedule_session_timeout(session_id: str):
+async def _schedule_session_timeout(session_id: int):
     # Sleep then expire the session (one-shot). This will automatically produce a final summary in the control message.
-    await asyncio.sleep(SESSION_TIMEOUT_SECONDS)
+    try:
+        await asyncio.sleep(SESSION_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        return
+
+    # At timeout, remove session and post final summary
     session = loot_sessions.pop(session_id, None)
+    # remove lock and cancel any remaining task
     session_locks.pop(session_id, None)
     if not session:
         return
 
     channel = bot.get_channel(session["channel_id"])
     if not channel:
+        # nothing to update
         return
 
     try:
@@ -758,18 +839,23 @@ class LootModal(nextcord.ui.Modal):
             "channel_id": interaction.channel.id,
             "loot_list_message_id": loot_list_message.id,
             "item_dropdown_message_id": None,
-            "last_action": None
+            "last_action": None,
+            "last_control_content": None,
+            "last_loot_content": None,
+            "timeout_task": None
         }
         loot_sessions[session_id] = session
 
         # schedule session timeout cleanup (one-shot)
-        asyncio.create_task(_schedule_session_timeout(session_id))
+        await _reset_session_timeout(session_id)
 
         # Build initial messages and views
         loot_list_content = build_loot_list_message(session)
         control_panel_content = build_control_panel_message(session)
         await loot_list_message.edit(content=loot_list_content)
         await control_panel_message.edit(content=control_panel_content, view=ControlPanelView(session_id))
+        session["last_control_content"] = control_panel_content
+        session["last_loot_content"] = loot_list_content
 
         # Create initial item dropdown message (will be recreated on updates)
         await _refresh_all_messages(session_id, interaction)
