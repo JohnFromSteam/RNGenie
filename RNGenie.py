@@ -293,10 +293,9 @@ class ItemDropdownView(nextcord.ui.View):
         Behavior:
          - validate the dropdown id / values
          - update session['selected_items'] under the session lock
-         - ACK the component immediately by editing the message via interaction.response.edit_message(...) if possible
-           (this reliably collapses the dropdown in desktop clients)
-         - if direct edit fails, fall back to defer_update() + fetch+edit
+         - acknowledge the component with defer_update() (we no longer attempt to force-collapse the client's dropdown)
          - refresh control/loot list messages (non-interaction path)
+         - reset inactivity timeout
         """
         session = loot_sessions.get(self.session_id)
         if not session:
@@ -332,45 +331,18 @@ class ItemDropdownView(nextcord.ui.View):
             current_master |= newly_selected
             session["selected_items"] = list(current_master)
 
-        # Prepare updated view/content (so edit reflects current selection)
-        if 0 <= session["current_turn"] < len(session["rolls"]):
-            picker = session["rolls"][session["current_turn"]]["member"]
-            picker_emoji = NUMBER_EMOJIS.get(session['current_turn'] + 1, "👉")
-            turn_text = "turn!" if not session.get("just_reversed", False) else "turn (direction reversed)!"
-            item_message_content = f"**{picker_emoji} {picker.mention}'s {turn_text}**\n\nChoose items below..."
-        else:
-            item_message_content = "Choose items below..."
-
-        item_view = ItemDropdownView(self.session_id)
-
-        # Primary approach: edit message via interaction response (this collapses the dropdown on desktop reliably)
-        edited_via_interaction = False
+        # Acknowledge the interaction without trying to collapse the client's dropdown.
+        # This prevents "This interaction failed" client messages and lets us update the bot UI separately.
         try:
-            await interaction.response.edit_message(content=item_message_content, view=item_view)
-            edited_via_interaction = True
+            await interaction.response.defer_update()
         except Exception:
-            # If direct edit failed (maybe response already used), fall back to defer_update() then fetch+edit
-            try:
-                await interaction.response.defer_update()
-            except Exception:
-                pass
-
-        if not edited_via_interaction:
-            # Best-effort fetch & edit the item message so clients immediately see the new view when they open again.
-            try:
-                ch = interaction.channel or bot.get_channel(session["channel_id"])
-                msg_id = session.get("item_dropdown_message_id")
-                if ch and msg_id:
-                    msg = await ch.fetch_message(msg_id)
-                    await msg.edit(content=item_message_content, view=item_view)
-            except Exception:
-                # ignore fetch/edit failures — refresh below will update messages normally
-                pass
+            # ignore ack failures; we will continue to refresh messages
+            pass
 
         # Refresh session timeout (activity)
         await _reset_session_timeout(session_id=self.session_id)
 
-        # Now refresh other messages (control panel / loot list) without touching interaction.response.
+        # Now refresh other messages (control panel / loot list).
         await _refresh_all_messages(self.session_id, interaction=None, delete_item=False)
 
     async def on_assign(self, interaction: nextcord.Interaction):
