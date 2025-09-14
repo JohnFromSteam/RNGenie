@@ -135,7 +135,6 @@ def build_loot_list_message(session):
 
     return f"{header}```ansi\n{ANSI_HEADER}✅ All Items Assigned ✅{ANSI_RESET}\n==================================\nAll items have been distributed.\n```"
 
-
 def build_control_panel_message(session):
     """Content for control panel (status + assigned items + turn indicator). Minimal footer/footers removed."""
     invoker = session["invoker"]
@@ -185,7 +184,6 @@ def build_control_panel_message(session):
 
     return f"{header}{roll_order_section}\n{assigned_items_section}{indicator}"
 
-
 def build_final_summary_message(session, timed_out=False):
     rolls = session["rolls"]
     header = "⌛ **The loot session has timed out — final summary:**\n\n" if timed_out else "✅ **Final Summary — all items assigned:**\n\n"
@@ -222,7 +220,6 @@ def build_final_summary_message(session, timed_out=False):
         unclaimed_section += "```"
 
     return f"{header}{roll_order_section}\n{assigned_items_section}\n{unclaimed_section}"
-
 
 # ===================================================================================================
 # ITEM DROPDOWN VIEW (third message)
@@ -347,10 +344,19 @@ class ItemDropdownView(nextcord.ui.View):
         try:
             await interaction.response.edit_message(content=item_message_content, view=item_view)
         except Exception:
-            # If editing via interaction fails (response already used / other), try to defer as a best-effort fallback.
-            # We purposely do NOT send any further response with this interaction after this point.
+            # If editing via interaction fails, try to acknowledge the component interaction
+            # using defer_update() and then edit the message via a fetch (best-effort).
             try:
-                await interaction.response.defer()
+                await interaction.response.defer_update()
+            except Exception:
+                pass
+
+            # best-effort: try to fetch & edit the message directly (works when interaction token is exhausted)
+            try:
+                ch = interaction.channel or bot.get_channel(session["channel_id"])
+                if ch and session.get("item_dropdown_message_id"):
+                    msg = await ch.fetch_message(session["item_dropdown_message_id"])
+                    await msg.edit(content=item_message_content, view=item_view)
             except Exception:
                 pass
 
@@ -466,9 +472,9 @@ class ControlPanelView(nextcord.ui.View):
             self.add_item(nextcord.ui.Button(label="Remove Selected", style=nextcord.ButtonStyle.danger, emoji="✖️", custom_id="remove_confirm_button", disabled=remove_disabled))
             self.add_item(nextcord.ui.Button(label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="start_button"))
         else:
-            # Post-start: NOTE — removed the "Undo" button from the control panel (under the round indicator).
-            # Undo remains available in the item-dropdown (third message) for the Loot Manager.
-            pass
+            # Post-start: allow undo (invoker only) and a terse control hint in the panel.
+            undo_disabled = not session.get("last_action")
+            self.add_item(nextcord.ui.Button(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=undo_disabled))
 
         # attach callbacks
         for child in self.children:
@@ -479,7 +485,8 @@ class ControlPanelView(nextcord.ui.View):
                     child.callback = self.on_remove_confirm
                 if child.custom_id == "start_button":
                     child.callback = self.on_start
-                # intentionally do NOT attach control-panel undo here (removed)
+                if child.custom_id == "undo_button":
+                    child.callback = self.on_undo
 
     async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
         session = loot_sessions.get(self.session_id)
@@ -487,7 +494,15 @@ class ControlPanelView(nextcord.ui.View):
             await interaction.response.send_message("❌ This loot session has expired or could not be found.", ephemeral=True)
             return False
 
-        # Invoker always allowed for control-panel interactions
+        # Undo restricted to invoker
+        if interaction.data.get("custom_id") == "undo_button":
+            if interaction.user.id == session["invoker_id"]:
+                return True
+            else:
+                await interaction.response.send_message("🛡️ Only the Loot Manager can use Undo.", ephemeral=True)
+                return False
+
+        # Invoker always allowed
         if interaction.user.id == session["invoker_id"]:
             return True
 
@@ -528,7 +543,19 @@ class ControlPanelView(nextcord.ui.View):
         _advance_turn_snake(session)
         await _refresh_all_messages(self.session_id, interaction)
 
-    # Note: control-panel on_undo removed (undo is available from the item-dropdown only)
+    async def on_undo(self, interaction: nextcord.Interaction):
+        session = loot_sessions.get(self.session_id)
+        if not session:
+            await interaction.response.send_message("Session expired.", ephemeral=True)
+            return
+        if interaction.user.id != session["invoker_id"]:
+            await interaction.response.send_message("🛡️ Only the Loot Manager can use Undo.", ephemeral=True)
+            return
+
+        if not await _undo_last_action(session, interaction):
+            return
+
+        await _refresh_all_messages(self.session_id, interaction, delete_item=True)
 
 # ===================================================================================================
 # MESSAGE REFRESH / LIFECYCLE
@@ -765,7 +792,6 @@ class LootModal(nextcord.ui.Modal):
         # Create initial item dropdown message (will be recreated on updates)
         await _refresh_all_messages(session_id, interaction)
 
-
 @bot.slash_command(name="loot", description="Starts a turn-based loot roll for your voice channel.")
 async def loot(interaction: nextcord.Interaction):
     if not interaction.user.voice:
@@ -782,7 +808,6 @@ async def on_ready():
     print(f'Logged in as {bot.user}')
     print('RNGenie is ready.')
     print('------')
-
 
 @bot.event
 async def on_application_command_error(interaction: nextcord.Interaction, error: Exception):
