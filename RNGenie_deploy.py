@@ -182,7 +182,7 @@ def build_control_panel_message(session):
 
 def build_final_summary_message(session, timed_out=False):
     rolls = session["rolls"]
-    header = "⌛ **The loot session has timed out.\n\nFinal summary:**\n\n" if timed_out else "✅ **Final Summary — all items assigned:**\n\n"
+    header = "⌛ **The loot session has timed out:**\n\n" if timed_out else "✅ **All Items Have Been Assigned:**\n\n"
 
     roll_order_section = f"```ansi\n{ANSI_HEADER}🎲 Roll Order 🎲{ANSI_RESET}\n==================================\n"
     roll_order_section += _build_roll_display(rolls)
