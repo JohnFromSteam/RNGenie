@@ -141,10 +141,10 @@ def build_control_panel_message(session):
     invoker = session["invoker"]
     rolls = session["rolls"]
 
-    header = f"**(2/2)**\n\n🎉 **Loot roll**\n\n**Loot Manager:** {invoker.mention}\n\n"
+    header = f"**(2/2)**\n\n✍️ **Loot Manager:** {invoker.mention}\n\n"
 
     # Roll order
-    roll_order_section = f"```ansi\n{ANSI_HEADER}🔢 Roll Order 🔢{ANSI_RESET}\n==================================\n"
+    roll_order_section = f"```ansi\n{ANSI_HEADER}🎲 Roll Order 🎲{ANSI_RESET}\n==================================\n"
     roll_order_section += _build_roll_display(rolls)
     roll_order_section += "\n```"
 
@@ -184,7 +184,7 @@ def build_final_summary_message(session, timed_out=False):
     rolls = session["rolls"]
     header = "⌛ **The loot session has timed out.\n\nFinal summary:**\n\n" if timed_out else "✅ **Final Summary — all items assigned:**\n\n"
 
-    roll_order_section = f"```ansi\n{ANSI_HEADER}🔢 Roll Order 🔢{ANSI_RESET}\n==================================\n"
+    roll_order_section = f"```ansi\n{ANSI_HEADER}🎲 Roll Order 🎲{ANSI_RESET}\n==================================\n"
     roll_order_section += _build_roll_display(rolls)
     roll_order_section += "\n```"
 
