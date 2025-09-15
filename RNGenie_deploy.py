@@ -509,14 +509,14 @@ class ControlPanelView(nextcord.ui.View):
             await interaction.response.send_message("Session expired.", ephemeral=True)
             return
 
-        # Defensive handling: session["members_to_remove"] may be None
+        # Defensive handling: session["members_to_remove"] may be None or contain malformed values
         vals = session.get("members_to_remove") or []
         ids_to_remove = set()
         for x in vals:
             try:
                 ids_to_remove.add(int(x))
-            except Exception:
-                # ignore malformed entries
+            except (TypeError, ValueError):
+                # ignore None/malformed entries
                 continue
 
         if ids_to_remove:
@@ -524,9 +524,8 @@ class ControlPanelView(nextcord.ui.View):
             session["rolls"] = [r for r in session["rolls"] if r["member"].id not in ids_to_remove]
             session["members_to_remove"] = None
 
-            # If no rollers remain, tidy up and remove session
+            # If no rollers remain, tidy up and remove session (best-effort)
             if not session["rolls"]:
-                # delete associated messages (best-effort) and cancel timeout task
                 ch = bot.get_channel(session["channel_id"])
                 if ch:
                     try:
@@ -540,6 +539,7 @@ class ControlPanelView(nextcord.ui.View):
                     except Exception:
                         pass
                     try:
+                        # attempt to notify in the control panel message
                         await ch.get_partial_message(interaction.message.id).edit(content="⚠️ The loot session was cancelled — no participants remain.", view=None)
                     except Exception:
                         pass
@@ -558,13 +558,13 @@ class ControlPanelView(nextcord.ui.View):
             # Adjust current_turn if out-of-range after removal
             if session["current_turn"] != TURN_NOT_STARTED:
                 if session["current_turn"] >= len(session["rolls"]):
-                    # clamp to last index
                     session["current_turn"] = max(0, len(session["rolls"]) - 1)
 
         # refresh session timeout (activity)
         await _reset_session_timeout(session_id=self.session_id)
 
         await _refresh_all_messages(self.session_id, interaction)
+
 
     async def on_start(self, interaction: nextcord.Interaction):
         session = loot_sessions.get(self.session_id)
