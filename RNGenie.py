@@ -188,20 +188,16 @@ def build_final_summary_message(session, timed_out=False):
     roll_order_section += _build_roll_display(rolls)
     roll_order_section += "\n```"
 
-    # Ensure header includes a trailing newline to avoid display quirks
-    assigned_items_header = f"```ansi\n{ANSI_HEADER}✅ Assigned Items ✅{ANSI_RESET}\n==================================\n"
+    assigned_items_header = f"```ansi\n{ANSI_HEADER}✅ Assigned Items ✅{ANSI_RESET}\n=================================="
     assigned_items_map = {r["member"].id: [] for r in rolls}
     for item in session["items"]:
         if item["assigned_to"]:
             assigned_items_map[item["assigned_to"]].append(item["name"])
 
-    # Build assigned items body without an extra leading newline
     assigned_items_body = ""
     for i, r in enumerate(rolls):
         emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        if i > 0:
-            assigned_items_body += "\n"
-        assigned_items_body += f"{emoji} {ANSI_USER}{r['member'].display_name}{ANSI_RESET}\n"
+        assigned_items_body += f"\n{emoji} {ANSI_USER}{r['member'].display_name}{ANSI_RESET}\n"
         if assigned_items_map[r["member"].id]:
             for nm in assigned_items_map[r["member"].id]:
                 assigned_items_body += f"- {nm}\n"
@@ -512,10 +508,58 @@ class ControlPanelView(nextcord.ui.View):
         if not session:
             await interaction.response.send_message("Session expired.", ephemeral=True)
             return
-        ids_to_remove = set(int(x) for x in session.get("members_to_remove", []))
+
+        # Defensive handling: session["members_to_remove"] may be None
+        vals = session.get("members_to_remove") or []
+        ids_to_remove = set()
+        for x in vals:
+            try:
+                ids_to_remove.add(int(x))
+            except Exception:
+                # ignore malformed entries
+                continue
+
         if ids_to_remove:
+            # remove participants
             session["rolls"] = [r for r in session["rolls"] if r["member"].id not in ids_to_remove]
             session["members_to_remove"] = None
+
+            # If no rollers remain, tidy up and remove session
+            if not session["rolls"]:
+                # delete associated messages (best-effort) and cancel timeout task
+                ch = bot.get_channel(session["channel_id"])
+                if ch:
+                    try:
+                        if session.get("loot_list_message_id"):
+                            await ch.get_partial_message(session["loot_list_message_id"]).delete()
+                    except Exception:
+                        pass
+                    try:
+                        if session.get("item_dropdown_message_id"):
+                            await ch.get_partial_message(session["item_dropdown_message_id"]).delete()
+                    except Exception:
+                        pass
+                    try:
+                        await ch.get_partial_message(interaction.message.id).edit(content="⚠️ The loot session was cancelled — no participants remain.", view=None)
+                    except Exception:
+                        pass
+
+                t = session.get("timeout_task")
+                if t:
+                    try:
+                        t.cancel()
+                    except Exception:
+                        pass
+
+                loot_sessions.pop(self.session_id, None)
+                session_locks.pop(self.session_id, None)
+                return
+
+            # Adjust current_turn if out-of-range after removal
+            if session["current_turn"] != TURN_NOT_STARTED:
+                if session["current_turn"] >= len(session["rolls"]):
+                    # clamp to last index
+                    session["current_turn"] = max(0, len(session["rolls"]) - 1)
 
         # refresh session timeout (activity)
         await _reset_session_timeout(session_id=self.session_id)
@@ -589,7 +633,6 @@ async def _refresh_all_messages(session_id, interaction=None, delete_item=True):
             session_locks.pop(session_id, None)
             return
 
-        # fetch partial messages (TextChannel expected)
         control_panel_msg = channel.get_partial_message(session_id)
         loot_list_msg = None
         loot_list_id = session.get("loot_list_message_id")
@@ -761,8 +804,7 @@ class LootModal(nextcord.ui.Modal):
             await interaction.followup.send("❌ You must be in a voice channel to set up a loot roll.", ephemeral=True)
             return
 
-        voice_channel = interaction.user.voice.channel
-        members_in_channel = voice_channel.members
+        members_in_channel = interaction.user.voice.channel.members
         if len(members_in_channel) > 20:
             await interaction.followup.send(f"❌ Too many users in the voice channel ({len(members_in_channel)})! The maximum is 20.", ephemeral=True)
             return
@@ -814,12 +856,9 @@ class LootModal(nextcord.ui.Modal):
             await interaction.followup.send("⚠️ You must enter at least one item.", ephemeral=True)
             return
 
-        # Send placeholder messages to get IDs (send in the channel where the command was used)
+        # Send placeholder messages to get IDs
         loot_list_message = await interaction.followup.send("`Initializing Loot List (1/2)...`", wait=True)
         control_panel_message = await interaction.channel.send("`Initializing Control Panel (2/2)...`")
-
-        # Use the actual channel where the control panel message was posted for session channel_id
-        session_channel_id = control_panel_message.channel.id
 
         session_id = control_panel_message.id
         session = {
@@ -833,7 +872,7 @@ class LootModal(nextcord.ui.Modal):
             "direction": 1,
             "just_reversed": False,
             "members_to_remove": None,
-            "channel_id": session_channel_id,  # ensure this is the text channel (not the voice channel object)
+            "channel_id": control_panel_message.channel.id,
             "loot_list_message_id": loot_list_message.id,
             "item_dropdown_message_id": None,
             "last_action": None,
