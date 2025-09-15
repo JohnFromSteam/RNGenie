@@ -8,18 +8,23 @@ RNGenie is a powerful yet easy-to-use Discord bot designed to manage turn-based 
 
 ## Features
 
--   **Slash Command Integration**: Simply type `/loot` to start a new session.
--   **Item Stacking**: Easily add multiple copies of the same item using `Nx` syntax (e.g., `5x Health Potion`).
--   **Automatic Member Detection**: Instantly finds all members in your current voice channel.
--   **Participant Management**: The Loot Master can remove participants from the roll order *before* the loot assignment begins.
--   **Randomized Roll Order**: Assigns a random roll (1-100) to each member and sorts them from highest to lowest, with fair, random tie-breaking.
--   **Fair Snake Draft System**: The turn order is a "snake draft" (e.g., 1 -> 2 -> 3, then 3 -> 2 -> 1) to ensure fairness.
--   **Clean Two-Message UI**: Separates the remaining loot list from the main control panel to reduce clutter. Both messages update live.
--   **Merged Final Summary**: When the session ends or times out, the two messages merge into a single, clean summary.
--   **Shared Control**: Both the Loot Master and the person whose turn it is can select and assign items or skip the turn.
--   **Undo Last Action**: The Loot Master can undo the most recent assignment or skip with a single click.
--   **Persistent Item Numbering**: Items in the loot list keep their original number throughout the session, preventing confusion.
--   **Automatic Timeout**: If a session is inactive for 30 minutes, it automatically times out and posts the final summary.
+- **Slash command**: `/loot` opens a modal where the Loot Manager pastes the item list (one item per line).
+- **Two-message UI + item message**:  
+  - **(1/2)** Remaining loot list (updates live)  
+  - **(2/2)** Control panel (Loot Manager controls)  
+  - **Third message** contains item selects and action buttons (Assign / Skip / Undo).
+- **Item stacking**: `Nx` syntax supported (e.g., `5x Health Potion`).
+- **Auto-detect participants**: finds members in the Loot Manager’s voice channel (max **20** participants).
+- **Randomized roll order + tie-breaker**: primary roll (1–100); ties get a random tiebreaker; sorting by `(roll, tiebreak)` descending.
+- **Fair snake draft**: order is snake (1 → 2 → 3, then 3 → 2 → 1). The bot tracks `round`, `direction`, and `just_reversed`.
+- **Multi-select + explicit assign**: you can select multiple items and click **Assign Selected** to finalize. Selecting does **not** immediately assign — it updates session state so reopened selects show previous selections.
+- **Skip & Undo**:  
+  - **Skip Turn** advances the draft.  
+  - **Undo** is available only **next to Skip Turn** in the item dropdown view. The control panel no longer shows a duplicate Undo.
+  - Undo reverts the most recent assignment or skip. Only the Loot Manager (session invoker) can Undo.
+- **Per-session locks & optimizations**: avoids race conditions and reduces unnecessary edits to Discord.
+- **Inactivity timeout**: sessions expire after **10 minutes** (configurable). On timeout the bot posts a final summary and cleans up state.
+
 
 ---
 
@@ -158,15 +163,21 @@ Your bot is now running persistently on the server!
 
 ## Usage
 
-1.  Join a voice channel with everyone who will be part of the loot roll.
-2.  In a text channel, type the slash command `/loot`.
-3.  A modal window will pop up. Paste or type the list of items to be distributed, one item per line.
-    -   **Tip:** Use the `Nx` prefix to add multiple copies of an item (e.g., `5x Health Potion`).
-4.  Click "Submit".
-5.  The bot posts two messages: **(1/2)** shows the list of remaining items, and **(2/2)** is the control panel.
-6.  **Before starting:** As the Loot Master, you can select members from the dropdown on message (2/2) to remove them from the roll.
-7.  **To start:** Click the "Start Loot Assignment!" button.
-8.  The current picker or the Loot Master can now use the dropdowns and buttons to assign items or skip turns. The Loot Master also has access to an `Undo` button to revert the last action.
+1. Join a voice channel with everyone who will be included in the loot roll.
+2. In a text channel, run `/loot`.
+3. Paste/type the items in the modal (one per line). Use `Nx` (e.g., `3x Mana Potion`) to stack items.
+4. Submit.
+5. The bot posts:
+    * **(1/2)** Remaining items (updates live)
+    * **(2/2)** Control panel (invoker controls)
+    * Third message: item selects + Assign Selected / Skip Turn / Undo
+6. **Before starting**: Loot Manager may remove participants via the dropdown on message (2/2).
+7. Click **Start Loot Assignment!** to begin the snake draft.
+8. For each pick:
+    * The current picker (or Loot Manager) opens the select(s), chooses one or more items, and clicks **Assign Selected** to confirm assignment. Selecting values updates session state but does not assign until **Assign Selected** is clicked.
+    * Click **Skip Turn** to pass.
+    * Loot Manager may click **Undo** (only next to Skip Turn) to revert the most recent assignment or skip.
+9. When all items are assigned or inactivity timeout occurs, a final summary replaces the control panel and the session is cleaned up.
 
 ---
 
