@@ -94,6 +94,35 @@ def _build_roll_display(rolls):
         lines.append(base)
     return "\n".join(lines)
 
+async def _maybe_get_message(channel, message_id):
+    """
+    Robust helper to obtain a message-like object that supports .edit() and .delete()
+    Works with channels that expose get_partial_message() (fast path) or fetch_message().
+    Returns None if message can't be obtained.
+    """
+    if not channel:
+        return None
+    # Fast-path: partial message accessor (synchronous)
+    try:
+        # Some channel types (TextChannel) provide get_partial_message()
+        get_partial = getattr(channel, "get_partial_message", None)
+        if callable(get_partial):
+            return get_partial(message_id)
+    except Exception:
+        # fall through to fetch attempt
+        pass
+
+    # Fall-back: attempt to fetch the full message asynchronously (TextChannel.fetch_message)
+    try:
+        fetch = getattr(channel, "fetch_message", None)
+        if callable(fetch):
+            return await channel.fetch_message(message_id)
+    except Exception:
+        pass
+
+    # Nothing worked
+    return None
+
 # ===================================================================================================
 # UNDO HELPER
 # ===================================================================================================
@@ -188,7 +217,8 @@ def build_final_summary_message(session, timed_out=False):
     roll_order_section += _build_roll_display(rolls)
     roll_order_section += "\n```"
 
-    assigned_items_header = f"```ansi\n{ANSI_HEADER}✅ Assigned Items ✅{ANSI_RESET}\n=================================="
+    # NOTE: ensure the header ends with a newline and avoid an extra blank line before the first member
+    assigned_items_header = f"```ansi\n{ANSI_HEADER}✅ Assigned Items ✅{ANSI_RESET}\n==================================\n"
     assigned_items_map = {r["member"].id: [] for r in rolls}
     for item in session["items"]:
         if item["assigned_to"]:
@@ -197,7 +227,9 @@ def build_final_summary_message(session, timed_out=False):
     assigned_items_body = ""
     for i, r in enumerate(rolls):
         emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        assigned_items_body += f"\n{emoji} {ANSI_USER}{r['member'].display_name}{ANSI_RESET}\n"
+        if i > 0:
+            assigned_items_body += "\n"
+        assigned_items_body += f"{emoji} {ANSI_USER}{r['member'].display_name}{ANSI_RESET}\n"
         if assigned_items_map[r["member"].id]:
             for nm in assigned_items_map[r["member"].id]:
                 assigned_items_body += f"- {nm}\n"
@@ -527,20 +559,25 @@ class ControlPanelView(nextcord.ui.View):
             # If no rollers remain, tidy up and remove session (best-effort)
             if not session["rolls"]:
                 ch = bot.get_channel(session["channel_id"])
+                # Try to delete associated messages (fast path uses helper)
                 if ch:
                     try:
-                        if session.get("loot_list_message_id"):
-                            await ch.get_partial_message(session["loot_list_message_id"]).delete()
+                        msg = await _maybe_get_message(ch, session.get("loot_list_message_id"))
+                        if msg:
+                            await msg.delete()
                     except Exception:
                         pass
                     try:
-                        if session.get("item_dropdown_message_id"):
-                            await ch.get_partial_message(session["item_dropdown_message_id"]).delete()
+                        msg = await _maybe_get_message(ch, session.get("item_dropdown_message_id"))
+                        if msg:
+                            await msg.delete()
                     except Exception:
                         pass
                     try:
                         # attempt to notify in the control panel message
-                        await ch.get_partial_message(interaction.message.id).edit(content="⚠️ The loot session was cancelled — no participants remain.", view=None)
+                        control_msg = await _maybe_get_message(ch, interaction.message.id)
+                        if control_msg:
+                            await control_msg.edit(content="⚠️ The loot session was cancelled — no participants remain.", view=None)
                     except Exception:
                         pass
 
@@ -633,16 +670,19 @@ async def _refresh_all_messages(session_id, interaction=None, delete_item=True):
             session_locks.pop(session_id, None)
             return
 
-        control_panel_msg = channel.get_partial_message(session_id)
+        # Robust message retrieval for control panel & loot list
+        control_panel_msg = await _maybe_get_message(channel, session_id)
         loot_list_msg = None
         loot_list_id = session.get("loot_list_message_id")
         if loot_list_id:
-            loot_list_msg = channel.get_partial_message(loot_list_id)
+            loot_list_msg = await _maybe_get_message(channel, loot_list_id)
 
         old_item_msg_id = session.get("item_dropdown_message_id")
         if delete_item and old_item_msg_id:
             try:
-                await channel.get_partial_message(old_item_msg_id).delete()
+                old_item_msg = await _maybe_get_message(channel, old_item_msg_id)
+                if old_item_msg:
+                    await old_item_msg.delete()
             except (nextcord.NotFound, nextcord.Forbidden):
                 pass
             session["item_dropdown_message_id"] = None
@@ -650,14 +690,32 @@ async def _refresh_all_messages(session_id, interaction=None, delete_item=True):
         if not _are_items_left(session) and session["current_turn"] != TURN_NOT_STARTED:
             final_content = build_final_summary_message(session, timed_out=False)
             try:
-                await control_panel_msg.edit(content=final_content, view=None)
+                if control_panel_msg:
+                    await control_panel_msg.edit(content=final_content, view=None)
+                else:
+                    # as a fallback try to fetch and edit
+                    fallback = await _maybe_get_message(channel, session_id)
+                    if fallback:
+                        await fallback.edit(content=final_content, view=None)
             except (nextcord.NotFound, nextcord.Forbidden):
                 pass
+
+            # Delete loot list and item dropdown if present
             if loot_list_msg:
                 try:
                     await loot_list_msg.delete()
                 except (nextcord.NotFound, nextcord.Forbidden):
                     pass
+            try:
+                item_msg = await _maybe_get_message(channel, session.get("item_dropdown_message_id"))
+                if item_msg:
+                    try:
+                        await item_msg.delete()
+                    except (nextcord.NotFound, nextcord.Forbidden):
+                        pass
+            except Exception:
+                pass
+
             # cleanup
             t = session.get("timeout_task")
             if t:
@@ -681,8 +739,9 @@ async def _refresh_all_messages(session_id, interaction=None, delete_item=True):
             nonlocal last_control
             if control_panel_content != last_control:
                 try:
-                    await control_panel_msg.edit(content=control_panel_content, view=ControlPanelView(session_id))
-                    session["last_control_content"] = control_panel_content
+                    if control_panel_msg:
+                        await control_panel_msg.edit(content=control_panel_content, view=ControlPanelView(session_id))
+                        session["last_control_content"] = control_panel_content
                 except (nextcord.NotFound, nextcord.Forbidden):
                     pass
 
@@ -722,15 +781,22 @@ async def _refresh_all_messages(session_id, interaction=None, delete_item=True):
         existing_id = session.get("item_dropdown_message_id")
         if not delete_item and existing_id:
             try:
-                existing_msg = channel.get_partial_message(existing_id)
-                await existing_msg.edit(content=item_message_content, view=item_view)
-                return
+                existing_msg = await _maybe_get_message(channel, existing_id)
+                if existing_msg:
+                    await existing_msg.edit(content=item_message_content, view=item_view)
+                    return
+                else:
+                    session["item_dropdown_message_id"] = None
             except (nextcord.NotFound, nextcord.Forbidden):
                 session["item_dropdown_message_id"] = None
 
         # create new dropdown message (fast path)
-        item_msg = await channel.send(item_message_content, view=item_view)
-        session["item_dropdown_message_id"] = item_msg.id
+        try:
+            item_msg = await channel.send(item_message_content, view=item_view)
+            session["item_dropdown_message_id"] = item_msg.id
+        except Exception:
+            # send failed (channel might not accept send) - ignore silently
+            session["item_dropdown_message_id"] = None
 
 # ===================================================================================================
 # TIMEOUT CLEANUP TASK
@@ -758,7 +824,9 @@ async def _schedule_session_timeout(session_id: int):
     loot_list_id = session.get("loot_list_message_id")
     if loot_list_id:
         try:
-            await channel.get_partial_message(loot_list_id).delete()
+            msg = await _maybe_get_message(channel, loot_list_id)
+            if msg:
+                await msg.delete()
         except (nextcord.NotFound, nextcord.Forbidden):
             pass
 
@@ -766,19 +834,22 @@ async def _schedule_session_timeout(session_id: int):
     item_msg_id = session.get("item_dropdown_message_id")
     if item_msg_id:
         try:
-            await channel.get_partial_message(item_msg_id).delete()
+            msg = await _maybe_get_message(channel, item_msg_id)
+            if msg:
+                await msg.delete()
         except (nextcord.NotFound, nextcord.Forbidden):
             pass
 
     # Edit control panel (2/2) into the final summary
     try:
-        control_msg = await channel.fetch_message(session_id)
-    except (nextcord.NotFound, nextcord.Forbidden):
-        return
+        control_msg = await _maybe_get_message(channel, session_id)
+    except Exception:
+        control_msg = None
 
     final_content = build_final_summary_message(session, timed_out=True)
     try:
-        await control_msg.edit(content=final_content, view=None)
+        if control_msg:
+            await control_msg.edit(content=final_content, view=None)
     except (nextcord.NotFound, nextcord.Forbidden):
         pass
 
@@ -872,6 +943,7 @@ class LootModal(nextcord.ui.Modal):
             "direction": 1,
             "just_reversed": False,
             "members_to_remove": None,
+            # store the channel id where control/loot messages live
             "channel_id": control_panel_message.channel.id,
             "loot_list_message_id": loot_list_message.id,
             "item_dropdown_message_id": None,
