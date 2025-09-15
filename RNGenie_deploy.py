@@ -704,9 +704,25 @@ async def _schedule_session_timeout(session_id: int):
 
     channel = bot.get_channel(session["channel_id"])
     if not channel:
-        # nothing to update
         return
 
+    # Clean up loot list (1/2)
+    loot_list_id = session.get("loot_list_message_id")
+    if loot_list_id:
+        try:
+            await channel.get_partial_message(loot_list_id).delete()
+        except (nextcord.NotFound, nextcord.Forbidden):
+            pass
+
+    # Clean up item dropdown (3/3)
+    item_msg_id = session.get("item_dropdown_message_id")
+    if item_msg_id:
+        try:
+            await channel.get_partial_message(item_msg_id).delete()
+        except (nextcord.NotFound, nextcord.Forbidden):
+            pass
+
+    # Edit control panel (2/2) into the final summary
     try:
         control_msg = await channel.fetch_message(session_id)
     except (nextcord.NotFound, nextcord.Forbidden):
