@@ -141,7 +141,7 @@ def build_control_panel_message(session):
     invoker = session["invoker"]
     rolls = session["rolls"]
 
-    header = f"**(2/2)**\n\n🎉 **Loot roll** — started by {invoker.mention}\n\n"
+    header = f"**(2/2)**\n\n🎉 **Loot roll**\n\n**Loot Manager:** {invoker.mention}\n\n"
 
     # Roll order
     roll_order_section = f"```ansi\n{ANSI_HEADER}🔢 Roll Order 🔢{ANSI_RESET}\n==================================\n"
@@ -182,13 +182,13 @@ def build_control_panel_message(session):
 
 def build_final_summary_message(session, timed_out=False):
     rolls = session["rolls"]
-    header = "⌛ **The loot session has timed out — final summary:**\n\n" if timed_out else "✅ **Final Summary — all items assigned:**\n\n"
+    header = "⌛ **The loot session has timed out.\n\nFinal summary:**\n\n" if timed_out else "✅ **Final Summary — all items assigned:**\n\n"
 
-    roll_order_section = f"```ansi\n{ANSI_HEADER}🔢 Final Roll Order 🔢{ANSI_RESET}\n==================================\n"
+    roll_order_section = f"```ansi\n{ANSI_HEADER}🔢 Roll Order 🔢{ANSI_RESET}\n==================================\n"
     roll_order_section += _build_roll_display(rolls)
     roll_order_section += "\n```"
 
-    assigned_items_header = f"```ansi\n{ANSI_HEADER}✅ Final Assigned Items ✅{ANSI_RESET}\n=================================="
+    assigned_items_header = f"```ansi\n{ANSI_HEADER}✅ Assigned Items ✅{ANSI_RESET}\n=================================="
     assigned_items_map = {r["member"].id: [] for r in rolls}
     for item in session["items"]:
         if item["assigned_to"]:
