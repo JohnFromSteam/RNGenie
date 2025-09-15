@@ -182,22 +182,26 @@ def build_control_panel_message(session):
 
 def build_final_summary_message(session, timed_out=False):
     rolls = session["rolls"]
-    header = "⌛ **The loot session has timed out.\n\nFinal summary:**\n\n" if timed_out else "✅ **Final Summary — all items assigned:**\n\n"
+    header = "⌛ **The loot session has timed out:**\n\n" if timed_out else "✅ **All Items Have Been Assigned:**\n\n"
 
     roll_order_section = f"```ansi\n{ANSI_HEADER}🎲 Roll Order 🎲{ANSI_RESET}\n==================================\n"
     roll_order_section += _build_roll_display(rolls)
     roll_order_section += "\n```"
 
-    assigned_items_header = f"```ansi\n{ANSI_HEADER}✅ Assigned Items ✅{ANSI_RESET}\n=================================="
+    # Ensure header includes a trailing newline to avoid display quirks
+    assigned_items_header = f"```ansi\n{ANSI_HEADER}✅ Assigned Items ✅{ANSI_RESET}\n==================================\n"
     assigned_items_map = {r["member"].id: [] for r in rolls}
     for item in session["items"]:
         if item["assigned_to"]:
             assigned_items_map[item["assigned_to"]].append(item["name"])
 
+    # Build assigned items body without an extra leading newline
     assigned_items_body = ""
     for i, r in enumerate(rolls):
         emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        assigned_items_body += f"\n{emoji} {ANSI_USER}{r['member'].display_name}{ANSI_RESET}\n"
+        if i > 0:
+            assigned_items_body += "\n"
+        assigned_items_body += f"{emoji} {ANSI_USER}{r['member'].display_name}{ANSI_RESET}\n"
         if assigned_items_map[r["member"].id]:
             for nm in assigned_items_map[r["member"].id]:
                 assigned_items_body += f"- {nm}\n"
@@ -585,6 +589,7 @@ async def _refresh_all_messages(session_id, interaction=None, delete_item=True):
             session_locks.pop(session_id, None)
             return
 
+        # fetch partial messages (TextChannel expected)
         control_panel_msg = channel.get_partial_message(session_id)
         loot_list_msg = None
         loot_list_id = session.get("loot_list_message_id")
@@ -756,7 +761,8 @@ class LootModal(nextcord.ui.Modal):
             await interaction.followup.send("❌ You must be in a voice channel to set up a loot roll.", ephemeral=True)
             return
 
-        members_in_channel = interaction.user.voice.channel.members
+        voice_channel = interaction.user.voice.channel
+        members_in_channel = voice_channel.members
         if len(members_in_channel) > 20:
             await interaction.followup.send(f"❌ Too many users in the voice channel ({len(members_in_channel)})! The maximum is 20.", ephemeral=True)
             return
@@ -808,9 +814,12 @@ class LootModal(nextcord.ui.Modal):
             await interaction.followup.send("⚠️ You must enter at least one item.", ephemeral=True)
             return
 
-        # Send placeholder messages to get IDs
+        # Send placeholder messages to get IDs (send in the channel where the command was used)
         loot_list_message = await interaction.followup.send("`Initializing Loot List (1/2)...`", wait=True)
         control_panel_message = await interaction.channel.send("`Initializing Control Panel (2/2)...`")
+
+        # Use the actual channel where the control panel message was posted for session channel_id
+        session_channel_id = control_panel_message.channel.id
 
         session_id = control_panel_message.id
         session = {
@@ -824,7 +833,7 @@ class LootModal(nextcord.ui.Modal):
             "direction": 1,
             "just_reversed": False,
             "members_to_remove": None,
-            "channel_id": interaction.channel.id,
+            "channel_id": session_channel_id,  # ensure this is the text channel (not the voice channel object)
             "loot_list_message_id": loot_list_message.id,
             "item_dropdown_message_id": None,
             "last_action": None,
