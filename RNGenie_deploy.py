@@ -548,4 +548,4 @@ async def on_application_command_error(interaction: nextcord.Interaction, error:
 
 if __name__ == "__main__":
     load_dotenv()
-    bot.run(os.getenv("DISCORD_TOKEN"))```
+    bot.run(os.getenv("DISCORD_TOKEN"))
