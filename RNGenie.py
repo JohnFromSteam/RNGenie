@@ -1,8 +1,4 @@
 # RNGenie.py
-# Updated: Keeps all previous functionality.
-# - Fix: removal Select now preserves selected members across edits.
-# - Adds ANSI color sequences into the code blocks for colored output.
-# - Minimal logging preserved.
 
 import os
 import random
