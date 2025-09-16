@@ -91,7 +91,7 @@ def _build_roll_lines(rolls: list) -> str:
     for idx, r in enumerate(rolls):
         emoji = NUMBER_EMOJIS.get(idx + 1, f"#{idx+1}")
         name = r["member"].display_name
-        base = f"{emoji} {name} ({r['roll']})"
+        base = f"{emoji} {BLUE}{name}{RESET} ({r['roll']})"
         if roll_counts.get(r["roll"], 0) > 1:
             tb = r.get("tiebreak")
             base += f" /TB:{tb if tb is not None else '—'}"
@@ -135,7 +135,7 @@ def build_loot_list_message(session: dict) -> str:
             "==================================\n"
         )
         for it in remaining:
-            body += f"{CYAN}{it['display_number']}.{RESET} {it['name']}\n"
+            body += f"{RED}{it['display_number']}.{RESET} {it['name']}\n"
         body += "```"
         return f"{header}{body}"
     return (
@@ -238,7 +238,7 @@ def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
             "==================================\n"
         )
         for it in unclaimed:
-            unclaimed_block += f"{CYAN}{it['display_number']}.{RESET} {it['name']}\n"
+            unclaimed_block += f"{RED}{it['display_number']}.{RESET} {it['name']}\n"
         unclaimed_block += "```"
     return f"{header}{roll_block}\n{assigned_block}\n{unclaimed_block}"
 
