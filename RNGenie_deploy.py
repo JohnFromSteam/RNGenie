@@ -1,8 +1,4 @@
 # RNGenie.py
-# Updated: Keeps all previous functionality.
-# - Fix: removal Select now preserves selected members across edits.
-# - Adds ANSI color sequences into the code blocks for colored output.
-# - Minimal logging preserved.
 
 import os
 import random
@@ -119,7 +115,7 @@ def build_loot_list_message(session: dict) -> str:
     if remaining:
         body = (
             "```ansi\n"
-            f"{YELLOW}{BOLD}❌ Remaining Loot Items ❌{RESET}\n"
+            f"{RED}{BOLD}❌ Remaining Loot Items ❌{RESET}\n"
             "==================================\n"
         )
         for it in remaining:
@@ -156,13 +152,14 @@ def build_control_panel_message(session: dict) -> str:
     )
     for i, r in enumerate(session["rolls"]):
         emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        assigned_block += f"{MAGENTA}{emoji} {r['member'].display_name}{RESET}\n"
+        assigned_block += f"{BLUE}{emoji} {r['member'].display_name}{RESET}\n"
         items = assigned_map.get(r["member"].id, [])
         if items:
             for nm in items:
                 assigned_block += f"- {nm}\n"
         else:
             assigned_block += "- N/A\n"
+        assigned_block += "\n"
     assigned_block += "```"
 
     indicator = ""
@@ -170,12 +167,12 @@ def build_control_panel_message(session: dict) -> str:
         direction = "Normal" if session["direction"] == 1 else "Reverse"
         indicator = f"\n🔔 **Round {session['round'] + 1}** ({direction})\n\n"
     else:
-        indicator = f"\n🎁 **Loot distribution is ready!**\n\n✍️ **Loot Manager {session['invoker'].mention} can remove participants or click below to begin.**"
+        indicator = f"\n🎁 **Loot distribution is ready!**\n\n✍️ **Loot Manager can remove participants or click below to begin.**"
     return f"{header}{roll_block}\n{assigned_block}{indicator}"
 
 def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
-    header = (f"⌛ {RED}{BOLD}**The loot session has timed out:**{RESET}\n\n" if timed_out 
-              else f"{GREEN}{BOLD}✅ **All Items Have Been Assigned:**{RESET}\n\n")
+    header = (f"⌛ {RED}{BOLD}The loot session has timed out:{RESET}\n\n" if timed_out 
+              else f"{GREEN}{BOLD}✅ All Items Have Been Assigned:{RESET}\n\n")
     roll_block = (
         "```ansi\n"
         f"{YELLOW}{BOLD}🎲 Roll Order 🎲{RESET}\n"
@@ -195,13 +192,14 @@ def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
     )
     for i, r in enumerate(session["rolls"]):
         emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        assigned_block += f"{MAGENTA}{emoji} {r['member'].display_name}{RESET}\n"
+        assigned_block += f"{BLUE}{emoji} {r['member'].display_name}{RESET}\n"
         items = assigned_map.get(r["member"].id, [])
         if items:
             for nm in items:
                 assigned_block += f"- {nm}\n"
         else:
             assigned_block += "- N/A\n"
+        assigned_block += "\n"
     assigned_block += "```"
 
     unclaimed = [it for it in session["items"] if it["assigned_to"] is None]
