@@ -1,6 +1,8 @@
 # RNGenie.py
-# Rewritten RNGenie: optimized/cleaner structure, minimal logging, force-delete/recreate of 3rd message after each turn,
-# and disallow invoking /loot from voice-linked text channels. Preserves original text outputs and behavior.
+# Updated: Keeps all previous functionality.
+# - Fix: removal Select now preserves selected members across edits.
+# - Adds ANSI color sequences into the code blocks for colored output.
+# - Minimal logging preserved.
 
 import os
 import random
@@ -9,6 +11,19 @@ import asyncio
 from dotenv import load_dotenv
 import nextcord
 from nextcord.ext import commands
+
+# ---------------------------
+# ANSI color sequences
+# ---------------------------
+CSI = "\x1b["
+RESET = CSI + "0m"
+BOLD = CSI + "1m"
+RED = CSI + "31m"
+GREEN = CSI + "32m"
+YELLOW = CSI + "33m"
+BLUE = CSI + "34m"
+MAGENTA = CSI + "35m"
+CYAN = CSI + "36m"
 
 # ---------------------------
 # Basic setup
@@ -31,7 +46,6 @@ NUMBER_EMOJIS = {
     1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣",
     6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟"
 }
-# extend placeholder for numbers beyond 10
 for i in range(11, 21):
     NUMBER_EMOJIS.setdefault(i, f"#{i}")
 
@@ -42,10 +56,9 @@ def _are_items_left(session: dict) -> bool:
     return any(it.get("assigned_to") is None for it in session["items"])
 
 def _advance_turn_snake(session: dict) -> None:
-    """Advance snake draft order. If at ends, reverse direction and increment round."""
     session["just_reversed"] = False
     if not _are_items_left(session):
-        session["current_turn"] = len(session["rolls"])  # marker for done
+        session["current_turn"] = len(session["rolls"])
         return
 
     num = len(session["rolls"])
@@ -62,11 +75,9 @@ def _advance_turn_snake(session: dict) -> None:
         session["direction"] *= -1
         session["round"] += 1
         session["just_reversed"] = True
-        # after reversing, advance one to the new direction
         session["current_turn"] = max(0, min(num - 1, session["current_turn"] + session["direction"]))
 
 def _build_roll_lines(rolls: list) -> str:
-    # include tiebreak numbers if present for duplicate rolls
     roll_counts = {}
     for r in rolls:
         roll_counts.setdefault(r["roll"], 0)
@@ -100,32 +111,52 @@ async def _get_msg(channel: nextcord.abc.GuildChannel | nextcord.TextChannel | N
     return None
 
 # ---------------------------
-# Message builders
+# Message builders (with ANSI colors)
 # ---------------------------
 def build_loot_list_message(session: dict) -> str:
-    header = "**(1/2)**\n"
+    header = f"**(1/2)**\n"
     remaining = [it for it in session["items"] if it["assigned_to"] is None]
     if remaining:
-        body = "```ansi\n❌ Remaining Loot Items ❌\n==================================\n"
+        body = (
+            "```ansi\n"
+            f"{YELLOW}{BOLD}❌ Remaining Loot Items ❌{RESET}\n"
+            "==================================\n"
+        )
         for it in remaining:
-            body += f"{it['display_number']}. {it['name']}\n"
+            body += f"{CYAN}{it['display_number']}.{RESET} {it['name']}\n"
         body += "```"
         return f"{header}{body}"
-    return f"{header}```ansi\n✅ All Items Assigned ✅\n==================================\nAll items have been distributed.\n```"
+    return (
+        f"{header}"
+        "```ansi\n"
+        f"{GREEN}{BOLD}✅ All Items Assigned ✅{RESET}\n"
+        "==================================\n"
+        "All items have been distributed.\n"
+        "```"
+    )
 
 def build_control_panel_message(session: dict) -> str:
     header = f"**(2/2)**\n\n✍️ **Loot Manager:** {session['invoker'].mention}\n\n"
-    roll_block = "```ansi\n🎲 Roll Order 🎲\n==================================\n" + _build_roll_lines(session["rolls"]) + "\n```"
+    roll_block = (
+        "```ansi\n"
+        f"{YELLOW}{BOLD}🎲 Roll Order 🎲{RESET}\n"
+        "==================================\n"
+        f"{_build_roll_lines(session['rolls'])}\n"
+        "```"
+    )
 
-    # assigned items per roller
     assigned_map = {r["member"].id: [] for r in session["rolls"]}
     for it in session["items"]:
         if it["assigned_to"]:
             assigned_map.setdefault(it["assigned_to"], []).append(it["name"])
-    assigned_block = "```ansi\n✅ Assigned Items ✅\n==================================\n"
+    assigned_block = (
+        "```ansi\n"
+        f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}\n"
+        "==================================\n"
+    )
     for i, r in enumerate(session["rolls"]):
         emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        assigned_block += f"{emoji} {r['member'].display_name}\n"
+        assigned_block += f"{MAGENTA}{emoji} {r['member'].display_name}{RESET}\n"
         items = assigned_map.get(r["member"].id, [])
         if items:
             for nm in items:
@@ -143,17 +174,28 @@ def build_control_panel_message(session: dict) -> str:
     return f"{header}{roll_block}\n{assigned_block}{indicator}"
 
 def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
-    header = "⌛ **The loot session has timed out:**\n\n" if timed_out else "✅ **All Items Have Been Assigned:**\n\n"
-    roll_block = "```ansi\n🎲 Roll Order 🎲\n==================================\n" + _build_roll_lines(session["rolls"]) + "\n```"
+    header = (f"⌛ {RED}{BOLD}**The loot session has timed out:**{RESET}\n\n" if timed_out 
+              else f"{GREEN}{BOLD}✅ **All Items Have Been Assigned:**{RESET}\n\n")
+    roll_block = (
+        "```ansi\n"
+        f"{YELLOW}{BOLD}🎲 Roll Order 🎲{RESET}\n"
+        "==================================\n"
+        f"{_build_roll_lines(session['rolls'])}\n"
+        "```"
+    )
 
     assigned_map = {r["member"].id: [] for r in session["rolls"]}
     for it in session["items"]:
         if it["assigned_to"]:
             assigned_map.setdefault(it["assigned_to"], []).append(it["name"])
-    assigned_block = "```ansi\n✅ Assigned Items ✅\n==================================\n"
+    assigned_block = (
+        "```ansi\n"
+        f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}\n"
+        "==================================\n"
+    )
     for i, r in enumerate(session["rolls"]):
         emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        assigned_block += f"{emoji} {r['member'].display_name}\n"
+        assigned_block += f"{MAGENTA}{emoji} {r['member'].display_name}{RESET}\n"
         items = assigned_map.get(r["member"].id, [])
         if items:
             for nm in items:
@@ -165,9 +207,13 @@ def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
     unclaimed = [it for it in session["items"] if it["assigned_to"] is None]
     unclaimed_block = ""
     if unclaimed:
-        unclaimed_block = "```ansi\n❌ Unclaimed Items ❌\n==================================\n"
+        unclaimed_block = (
+            "```ansi\n"
+            f"{RED}{BOLD}❌ Unclaimed Items ❌{RESET}\n"
+            "==================================\n"
+        )
         for it in unclaimed:
-            unclaimed_block += f"{it['display_number']}. {it['name']}\n"
+            unclaimed_block += f"{CYAN}{it['display_number']}.{RESET} {it['name']}\n"
         unclaimed_block += "```"
     return f"{header}{roll_block}\n{assigned_block}\n{unclaimed_block}"
 
@@ -204,7 +250,6 @@ class ItemDropdownView(nextcord.ui.View):
         if not available:
             return
 
-        # chunk into up to 25 options per select
         chunks = [available[i:i+25] for i in range(0, len(available), 25)]
         selected = set(session.get("selected_items") or [])
         for ci, chunk in enumerate(chunks):
@@ -212,7 +257,8 @@ class ItemDropdownView(nextcord.ui.View):
             for idx, item in chunk:
                 label = f"{item['display_number']}. {item['name']}"
                 truncated = (label[:97] + "...") if len(label) > 100 else label
-                opts.append(nextcord.SelectOption(label=truncated, value=str(idx), default=str(idx) in selected))
+                default = str(idx) in selected
+                opts.append(nextcord.SelectOption(label=truncated, value=str(idx), default=default))
             placeholder = "Choose items..." if len(chunks) == 1 else f"Choose items ({chunk[0][1]['display_number']}-{chunk[-1][1]['display_number']})..."
             self.add_item(nextcord.ui.Select(placeholder=placeholder, options=opts, custom_id=f"item_select_{ci}", min_values=0, max_values=len(opts)))
 
@@ -222,7 +268,6 @@ class ItemDropdownView(nextcord.ui.View):
         undo_disabled = not session.get("last_action")
         self.add_item(nextcord.ui.Button(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=undo_disabled))
 
-        # assign callbacks
         for child in self.children:
             if getattr(child, "custom_id", None) == "assign_button":
                 child.callback = self.on_assign
@@ -234,7 +279,6 @@ class ItemDropdownView(nextcord.ui.View):
                 child.callback = self.on_item_select
 
     async def _fast_edit(self, interaction: nextcord.Interaction, content: str, view: nextcord.ui.View | None) -> bool:
-        # try editing as response for snappy UX; fall back to edit via stored id, or send new message.
         session = loot_sessions.get(self.session_id)
         if not session:
             try:
@@ -335,7 +379,6 @@ class ItemDropdownView(nextcord.ui.View):
 
         await self._ack(interaction)
         await _reset_session_timeout(self.session_id)
-        # background refresh (non-blocking)
         asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=False))
 
     async def on_assign(self, interaction: nextcord.Interaction):
@@ -386,9 +429,7 @@ class ItemDropdownView(nextcord.ui.View):
         new_text, active = _item_message_text_and_active(session)
         new_view = ItemDropdownView(self.session_id) if active else None
 
-        # Force delete+recreate after each turn for the third message as requested:
         edited = await self._fast_edit(interaction, new_text, new_view)
-        # Always refresh with delete_item=True to ensure recreate
         asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
 
     async def on_skip(self, interaction: nextcord.Interaction):
@@ -409,7 +450,6 @@ class ItemDropdownView(nextcord.ui.View):
                     pass
                 return
 
-        # record undo state
         if session["current_turn"] != TURN_NOT_STARTED:
             session["last_action"] = {
                 "turn": session["current_turn"],
@@ -431,7 +471,6 @@ class ItemDropdownView(nextcord.ui.View):
         new_view = ItemDropdownView(self.session_id) if active else None
 
         await self._fast_edit(interaction, new_text, new_view)
-        # ensure delete+recreate after each turn
         asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
 
     async def on_undo(self, interaction: nextcord.Interaction):
@@ -488,17 +527,18 @@ class ControlPanelView(nextcord.ui.View):
             return
 
         if session["current_turn"] == TURN_NOT_STARTED:
-            # removal select
             options = []
             inv = session["invoker_id"]
+            members_to_remove = set(session.get("members_to_remove") or [])
             for r in session["rolls"]:
                 if r["member"].id != inv:
-                    options.append(nextcord.SelectOption(label=r["member"].display_name, value=str(r["member"].id)))
+                    val = str(r["member"].id)
+                    default_selected = val in members_to_remove
+                    options.append(nextcord.SelectOption(label=r["member"].display_name, value=val, default=default_selected))
             if options:
                 self.add_item(nextcord.ui.Select(placeholder="Select participants to remove...", options=options, custom_id="remove_select", min_values=0, max_values=len(options)))
             self.add_item(nextcord.ui.Button(label="Remove Selected", style=nextcord.ButtonStyle.danger, emoji="✖️", custom_id="remove_confirm_button"))
             self.add_item(nextcord.ui.Button(label="📜 Start Loot Assignment!", style=nextcord.ButtonStyle.success, custom_id="start_button"))
-        # assign callbacks
         for child in self.children:
             if getattr(child, "custom_id", "") == "remove_select":
                 child.callback = self.on_remove_select
@@ -531,7 +571,9 @@ class ControlPanelView(nextcord.ui.View):
             except Exception:
                 pass
             return
-        session["members_to_remove"] = interaction.data.get("values")
+        # store as list of strings to match SelectOption.values
+        vals = interaction.data.get("values") or []
+        session["members_to_remove"] = list(vals)
         self._populate()
         try:
             await interaction.response.edit_message(view=self)
@@ -561,7 +603,6 @@ class ControlPanelView(nextcord.ui.View):
             session["members_to_remove"] = None
             if not session["rolls"]:
                 ch = bot.get_channel(session["channel_id"])
-                # tidy messages if possible
                 try:
                     lm = await _get_msg(ch, session.get("loot_list_message_id"))
                     if lm:
@@ -593,7 +634,6 @@ class ControlPanelView(nextcord.ui.View):
                 except Exception:
                     pass
                 return
-            # keep current_turn in bounds
             if session["current_turn"] != TURN_NOT_STARTED and session["current_turn"] >= len(session["rolls"]):
                 session["current_turn"] = max(0, len(session["rolls"]) - 1)
 
@@ -602,7 +642,6 @@ class ControlPanelView(nextcord.ui.View):
             await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
-        # force delete+recreate of item message when participants change
         asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
 
     async def on_start(self, interaction: nextcord.Interaction):
@@ -622,7 +661,6 @@ class ControlPanelView(nextcord.ui.View):
             await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
-        # force delete+recreate of the item message when starting
         asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
 
 # ---------------------------
@@ -648,7 +686,6 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
     async with lock:
         ch = bot.get_channel(session["channel_id"])
         if not ch:
-            # cleanup
             t = session.get("timeout_task")
             if t:
                 try:
@@ -659,7 +696,6 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             session_locks.pop(session_id, None)
             return
 
-        # try to load existing msgs
         control_msg = await _get_msg(ch, session_id)
         loot_msg = await _get_msg(ch, session.get("loot_list_message_id"))
         existing_item_msg = None
@@ -667,7 +703,6 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
         if existing_item_id:
             existing_item_msg = await _get_msg(ch, existing_item_id)
 
-        # If delete_item requested, attempt to delete current item dropdown before recreating
         if delete_item and existing_item_msg:
             try:
                 await existing_item_msg.delete()
@@ -677,14 +712,12 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             existing_item_msg = None
             existing_item_id = None
 
-        # If session completed, post final summary and cleanup
         if not _are_items_left(session) and session["current_turn"] != TURN_NOT_STARTED:
             final = build_final_summary_message(session, timed_out=False)
             try:
                 if control_msg:
                     await control_msg.edit(content=final, view=None)
                 else:
-                    # fallback if control msg not available
                     fallback = await _get_msg(ch, session_id)
                     if fallback:
                         await fallback.edit(content=final, view=None)
@@ -695,7 +728,6 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
                     await loot_msg.delete()
                 except Exception:
                     pass
-            # remove any remaining item msg
             try:
                 existing = session.get("item_dropdown_message_id")
                 if existing:
@@ -714,11 +746,9 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             session_locks.pop(session_id, None)
             return
 
-        # build latest content
         loot_content = build_loot_list_message(session)
         control_content = build_control_panel_message(session)
 
-        # reduce edits by comparing last stored
         if loot_content != session.get("last_loot_content") and loot_msg:
             try:
                 await loot_msg.edit(content=loot_content)
@@ -735,10 +765,8 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
 
         await _reset_session_timeout(session_id)
 
-        # manage item dropdown message (only when there's an active pick)
         is_active = (0 <= session["current_turn"] < len(session["rolls"])) and _are_items_left(session)
         if not is_active:
-            # ensure deleted if present
             if not delete_item and existing_item_msg:
                 try:
                     await existing_item_msg.delete()
@@ -754,7 +782,6 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
 
         view = ItemDropdownView(session_id)
 
-        # prefer editing existing item message only if delete_item is False
         if existing_item_msg and not delete_item:
             try:
                 await existing_item_msg.edit(content=item_text, view=view)
@@ -764,7 +791,6 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
                 session["item_dropdown_message_id"] = None
                 existing_item_msg = None
 
-        # create new item message
         try:
             new_msg = await ch.send(item_text, view=view)
             session["item_dropdown_message_id"] = new_msg.id
@@ -784,7 +810,6 @@ async def _schedule_session_timeout(session_id: int):
     ch = bot.get_channel(session["channel_id"])
     if not ch:
         return
-    # delete loot list and item messages if possible
     try:
         lm = await _get_msg(ch, session.get("loot_list_message_id"))
         if lm:
@@ -821,7 +846,6 @@ class LootModal(nextcord.ui.Modal):
         self.add_item(self.loot_items)
 
     async def callback(self, interaction: nextcord.Interaction):
-        # require that the command be invoked in a regular text channel (not voice-linked text)
         channel_type = getattr(interaction.channel, "type", None)
         if channel_type in (nextcord.ChannelType.voice, nextcord.ChannelType.stage_voice):
             await interaction.response.send_message("❌ Please run `/loot` in a regular text channel (not a voice-linked text chat).", ephemeral=True)
@@ -829,7 +853,6 @@ class LootModal(nextcord.ui.Modal):
 
         await interaction.response.defer(ephemeral=True)
 
-        # user must be in a voice channel to reference its members
         if not (interaction.user and interaction.user.voice and interaction.user.voice.channel):
             await interaction.followup.send("❌ You must be in a voice channel to set up a loot roll.", ephemeral=True)
             return
@@ -842,7 +865,6 @@ class LootModal(nextcord.ui.Modal):
             await interaction.followup.send(f"❌ Too many users in the voice channel ({len(members)})! The maximum is 20.", ephemeral=True)
             return
 
-        # generate primary rolls and tiebreakers
         rolls = [{"member": m, "roll": random.randint(1, 100)} for m in members]
         by_roll = {}
         for r in rolls:
@@ -856,7 +878,6 @@ class LootModal(nextcord.ui.Modal):
             return (r["roll"], r.get("tiebreak", -1))
         rolls.sort(key=_sort_key, reverse=True)
 
-        # parse item lines (support Nx syntax)
         lines = self.loot_items.value.splitlines()
         names = []
         for l in lines:
@@ -882,7 +903,6 @@ class LootModal(nextcord.ui.Modal):
             await interaction.followup.send("⚠️ You must enter at least one item.", ephemeral=True)
             return
 
-        # send placeholder messages to obtain ids
         loot_msg = await interaction.followup.send("`Initializing Loot List (1/2)...`", wait=True)
         control_msg = await interaction.channel.send("`Initializing Control Panel (2/2)...`")
 
@@ -897,7 +917,7 @@ class LootModal(nextcord.ui.Modal):
             "round": 0,
             "direction": 1,
             "just_reversed": False,
-            "members_to_remove": None,
+            "members_to_remove": None,  # stored as list[str] matching SelectOption.value
             "channel_id": control_msg.channel.id,
             "loot_list_message_id": loot_msg.id,
             "item_dropdown_message_id": None,
@@ -909,18 +929,15 @@ class LootModal(nextcord.ui.Modal):
         loot_sessions[session_id] = session
         await _reset_session_timeout(session_id)
 
-        # build and set initial message content
         await loot_msg.edit(content=build_loot_list_message(session))
         await control_msg.edit(content=build_control_panel_message(session), view=ControlPanelView(session_id))
         session["last_control_content"] = build_control_panel_message(session)
         session["last_loot_content"] = build_loot_list_message(session)
 
-        # create initial item dropdown (force delete/recreate behavior on each change handled elsewhere)
         asyncio.create_task(_refresh_all_messages(session_id, delete_item=True))
 
 @bot.slash_command(name="loot", description="Starts a turn-based loot roll for your voice channel.")
 async def loot(interaction: nextcord.Interaction):
-    # disallow invoking the command in voice-linked text chats
     ch_type = getattr(interaction.channel, "type", None)
     if ch_type in (nextcord.ChannelType.voice, nextcord.ChannelType.stage_voice):
         await interaction.response.send_message("❌ Please run `/loot` in a regular text channel (not a voice-linked text chat).", ephemeral=True)
@@ -932,12 +949,10 @@ async def loot(interaction: nextcord.Interaction):
 # ---------------------------
 @bot.event
 async def on_ready():
-    # minimal output
     print(f"RNGenie ready as {bot.user}")
 
 @bot.event
 async def on_application_command_error(interaction: nextcord.Interaction, error: Exception):
-    # minimal error response to user
     try:
         if not interaction.is_expired():
             if interaction.response.is_done():
