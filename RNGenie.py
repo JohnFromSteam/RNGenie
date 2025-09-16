@@ -76,7 +76,9 @@ def _advance_turn_snake(session: dict) -> None:
         session["direction"] *= -1
         session["round"] += 1
         session["just_reversed"] = True
-        # keep current_turn the same so the same player picks again
+        # if there's only one roller, ensure index stays valid
+        if num == 1:
+            session["current_turn"] = 0
 
 def _build_roll_lines(rolls: list) -> str:
     """
