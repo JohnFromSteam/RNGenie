@@ -76,7 +76,7 @@ def _advance_turn_snake(session: dict) -> None:
         session["direction"] *= -1
         session["round"] += 1
         session["just_reversed"] = True
-        session["current_turn"] = max(0, min(num - 1, session["current_turn"] + session["direction"]))
+        # keep current_turn the same so the same player picks again
 
 def _build_roll_lines(rolls: list) -> str:
     """
