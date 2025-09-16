@@ -199,8 +199,8 @@ def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
     Build final summary that is shown either when timed out or all items assigned.
     Includes roll order, final assigned lists, and any unclaimed items.
     """
-    header = ("⌛ **The loot session has timed out:**\n\n" if timed_out 
-              else "✅ **All Items Have Been Assigned:**\n\n")
+    header = ("⌛ **The loot session has timed out!**\n\n" if timed_out 
+              else "✅ **All items have been assigned!**\n\n")
     roll_block = (
         "```ansi\n"
         f"{YELLOW}{BOLD}🎲 Roll Order 🎲{RESET}\n"
