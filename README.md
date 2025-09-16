@@ -1,6 +1,6 @@
 # RNGenie: A Discord Loot Distribution Bot
 
-RNGenie is a powerful yet easy-to-use Discord bot designed to manage turn-based loot distribution for games and events. It uses a fair "snake draft" system, a modern slash command (`/loot`), and a dynamic two-message interface that keeps your chat clean and merges into a final summary.
+RNGenie is a powerful yet easy-to-use Discord bot designed to manage turn-based loot distribution for games and events. It uses a fair "snake draft" system, a modern slash command (`/loot`), and a dynamic multi-message interface that keeps your chat clean and merges into a final summary upon completion.
 
 [![RNGenie: A Discord Loot Distribution Bot](https://img.youtube.com/vi/gKJX9DPIpS0/maxresdefault.jpg)](https://www.youtube.com/watch?v=gKJX9DPIpS0)
 
@@ -8,23 +8,21 @@ RNGenie is a powerful yet easy-to-use Discord bot designed to manage turn-based 
 
 ## Features
 
-- **Slash command**: `/loot` opens a modal where the Loot Manager pastes the item list (one item per line).
-- **Two-message UI + item message**:  
-  - **(1/2)** Remaining loot list (updates live)  
-  - **(2/2)** Control panel (Loot Manager controls)  
-  - **Third message** contains item selects and action buttons (Assign / Skip / Undo).
-- **Item stacking**: `Nx` syntax supported (e.g., `5x Health Potion`).
-- **Auto-detect participants**: finds members in the Loot Manager’s voice channel (max **20** participants).
-- **Randomized roll order + tie-breaker**: primary roll (1–100); ties get a random tiebreaker; sorting by `(roll, tiebreak)` descending.
-- **Fair snake draft**: order is snake (1 → 2 → 3, then 3 → 2 → 1). The bot tracks `round`, `direction`, and `just_reversed`.
-- **Multi-select + explicit assign**: you can select multiple items and click **Assign Selected** to finalize. Selecting does **not** immediately assign — it updates session state so reopened selects show previous selections.
-- **Skip & Undo**:  
-  - **Skip Turn** advances the draft.  
-  - **Undo** is available only **next to Skip Turn** in the item dropdown view. The control panel no longer shows a duplicate Undo.
-  - Undo reverts the most recent assignment or skip. Only the Loot Manager (session invoker) can Undo.
-- **Per-session locks & optimizations**: avoids race conditions and reduces unnecessary edits to Discord.
-- **Inactivity timeout**: sessions expire after **10 minutes** (configurable). On timeout the bot posts a final summary and cleans up state.
-
+- **Slash Command**: `/loot` opens a modal where the Loot Manager pastes the item list (one item per line).
+- **Multi-Message UI**:
+  - **(1/2)** A dedicated message showing the remaining loot list, which updates live.
+  - **(2/2)** The main control panel, showing roll order, assigned items, and Loot Manager controls.
+  - A third, temporary message appears for the current picker, containing item selection dropdowns and action buttons (Assign / Skip / Undo).
+- **Item Stacking**: `Nx` syntax is supported for quickly adding multiple copies of an item (e.g., `5x Health Potion`).
+- **Auto-Detect Participants**: Automatically finds and includes all members in the Loot Manager’s voice channel (max **20** participants).
+- **Randomized Roll Order + Tie-Breaker**: A primary roll (1–100) determines the initial order. Any ties are resolved by a second random tie-breaker roll, ensuring a fair and unique sequence.
+- **Fair Snake Draft**: The pick order follows a snake pattern (1 → 2 → 3, then reverses 3 → 2 → 1) to ensure fairness across rounds.
+- **Multi-Select & Explicit Assignment**: Pickers can select multiple items from dropdowns before clicking a single **Assign Selected** button to finalize their turn.
+- **Skip & Undo**:
+  - **Skip Turn** allows a user to pass on their pick.
+  - **Undo**, available only to the Loot Manager, reverts the most recent assignment or skip, restoring the session to its previous state.
+- **Per-Session Locks & Optimizations**: Uses `asyncio.Lock` to prevent race conditions during rapid actions and minimizes unnecessary message edits to respect Discord API limits.
+- **Inactivity Timeout**: Sessions automatically expire after **10 minutes** of inactivity. On timeout, the bot posts a final summary and cleans up all temporary messages.
 
 ---
 
@@ -53,15 +51,15 @@ You can run RNGenie locally for testing or deploy it to a 24/7 hosting provider.
     ```
 
 3.  **Install Dependencies:**
-    A `requirements.txt` file is included with all necessary libraries.
+    A `requirements.txt` file should be created containing `nextcord` and `python-dotenv`.
     ```sh
-    pip install -r requirements.txt
+    pip install nextcord python-dotenv
     ```
 
 4.  **Create a Discord Bot Application:**
     -   Go to the [Discord Developer Portal](https://discord.com/developers/applications) and create a "New Application".
-    -   Go to the "Bot" tab and click "Add Bot".
-    -   Under **Privileged Gateway Intents**, enable **Presence Intent**, **Server Members Intent**, and **Message Content Intent**.
+    -   Navigate to the "Bot" tab and click "Add Bot".
+    -   Under **Privileged Gateway Intents**, enable the **Server Members Intent**. This is required for the bot to see who is in the voice channel.
     -   Click "Reset Token" to reveal your bot's token. **Keep this token private!**
 
 5.  **Create a `.env` File:**
@@ -78,15 +76,13 @@ You can run RNGenie locally for testing or deploy it to a 24/7 hosting provider.
         -   `View Channels`
         -   `Send Messages`
         -   `Read Message History`
-        -   `Use Slash Commands`
-        -   `Connect`
     -   Copy the generated URL and paste it into your browser to invite the bot to your server.
 
 7.  **Run the Bot:**
     ```sh
     python RNGenie.py
     ```
-    You will see a "Logged in as..." message in your terminal. The bot is now online and ready to use!
+    You should see a message in your terminal confirming the bot is ready. It is now online and ready to use!
 
 ---
 
@@ -99,7 +95,7 @@ Platforms like **Railway** or **Fly.io** simplify deployment. They generally fol
 
 1.  **Link Your GitHub Repository:** Connect your hosting account to the GitHub repository containing the bot's code.
 2.  **Configure Build Settings:**
-    -   **Build Command**: `pip install -r requirements.txt`
+    -   **Build Command**: `pip install -r requirements.txt` (ensure you have this file).
     -   **Start Command**: `python RNGenie.py`
 3.  **Set Environment Variables:** In your host's dashboard, find the "Environment Variables" or "Secrets" section and add your bot's token.
     -   **Variable Name**: `DISCORD_TOKEN`
@@ -163,42 +159,52 @@ Your bot is now running persistently on the server!
 
 ## Usage
 
-1. Join a voice channel with everyone who will be included in the loot roll.
-2. In a text channel, run `/loot`.
-3. Paste/type the items in the modal (one per line). Use `Nx` (e.g., `3x Mana Potion`) to stack items.
-4. Submit.
-5. The bot posts:
-    * **(1/2)** Remaining items (updates live)
-    * **(2/2)** Control panel (invoker controls)
-    * Third message: item selects + Assign Selected / Skip Turn / Undo
-6. **Before starting**: Loot Manager may remove participants via the dropdown on message (2/2).
-7. Click **Start Loot Assignment!** to begin the snake draft.
-8. For each pick:
-    * The current picker (or Loot Manager) opens the select(s), chooses one or more items, and clicks **Assign Selected** to confirm assignment. Selecting values updates session state but does not assign until **Assign Selected** is clicked.
-    * Click **Skip Turn** to pass.
-    * Loot Manager may click **Undo** (only next to Skip Turn) to revert the most recent assignment or skip.
-9. When all items are assigned or inactivity timeout occurs, a final summary replaces the control panel and the session is cleaned up.
+1.  Join a voice channel with everyone who will participate in the loot roll.
+2.  In a text channel (but not a voice-linked text chat), run `/loot`.
+3.  Paste or type the items into the modal window (one per line). Use `Nx` (e.g., `3x Mana Potion`) for multiple copies of an item.
+4.  Submit the modal.
+5.  The bot posts the interface:
+    *   **(1/2)** A message listing all remaining items.
+    *   **(2/2)** The control panel showing the roll order and assigned items.
+    *   A third message appears only when a pick is active, prompting the current user to choose.
+6.  **Before starting**: The Loot Manager can use the dropdown on message (2/2) to remove participants if needed.
+7.  Click **📜 Start Loot Assignment!** to begin the draft.
+8.  For each pick:
+    *   The current picker (or the Loot Manager) uses the dropdown(s) in the third message to select one or more items.
+    *   Click **Assign Selected** to confirm the choice and advance the turn.
+    *   Alternatively, click **Skip Turn** to pass.
+    *   The Loot Manager may click **Undo** to revert the most recent assignment or skip.
+9.  When all items are assigned, or if the session times out, the control panel is replaced with a final summary, and all other session messages are cleaned up.
 
 ---
 
 ## Customization
 
-You can easily change the bot's color scheme to match your server's theme.
+You can easily change the bot's color scheme by editing the ANSI color constants at the top of `RNGenie.py`. These variables control the colors used in the code-block-formatted messages.
 
 1.  Open `RNGenie.py`.
-2.  Find the `BOT SETUP` section at the top of the file.
-3.  Modify the ANSI color code variables:
+2.  Find the ANSI color constants defined near the top of the file.
+3.  Modify the variables to change the bot's appearance. Each variable controls a specific element:
+
     ```python
-    # ANSI color codes for formatting the text blocks in Discord messages.
-    ANSI_RESET = "\u001b[0m"
-    ANSI_HEADER = "\u001b[0;33m" # Color for titles like "Roll Order"
-    ANSI_USER = "\u001b[0;34m"   # Color for user display names
+    # ANSI color constants used to produce colored code-block output in Discord messages.
+    CSI = "\x1b["
+    RESET = CSI + "0m"
+    BOLD = CSI + "1m"
+    RED = CSI + "31m"      # Headers for Remaining/Unclaimed loot
+    GREEN = CSI + "32m"    # Headers for Assigned Items/Completion
+    YELLOW = CSI + "33m"   # Header for the "Roll Order" block
+    BLUE = CSI + "34m"     # Color for user display names
+    MAGENTA = CSI + "35m"  # Not currently used
+    CYAN = CSI + "36m"     # Not currently used
     ```
-4.  You can change the number (`33`, `34`, etc.) to any of the following standard colors:
+
+4.  You can change the number (`31`, `32`, etc.) to any of the following standard colors:
+    -   `30`: Black
     -   `31`: Red
     -   `32`: Green
-    -   `33`: Yellow/Orange
+    -   `33`: Yellow
     -   `34`: Blue
-    -   `35`: Magenta/Pink
+    -   `35`: Magenta
     -   `36`: Cyan
-    -   `37`: White/Light Grey
+    -   `37`: White
