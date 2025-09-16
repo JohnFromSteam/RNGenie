@@ -1,4 +1,4 @@
-# RNGenie.py
+# RNGenie.py - Discord loot distribution bot
 
 import os
 import random
@@ -8,9 +8,7 @@ from dotenv import load_dotenv
 import nextcord
 from nextcord.ext import commands
 
-# ---------------------------
-# ANSI color sequences
-# ---------------------------
+# ANSI color constants used to produce colored code-block output in Discord messages.
 CSI = "\x1b["
 RESET = CSI + "0m"
 BOLD = CSI + "1m"
@@ -21,23 +19,24 @@ BLUE = CSI + "34m"
 MAGENTA = CSI + "35m"
 CYAN = CSI + "36m"
 
-# ---------------------------
-# Basic setup
-# ---------------------------
+# Setup bot intents and create the bot object.
 intents = nextcord.Intents.default()
 intents.members = True
 intents.voice_states = True
 
 bot = commands.Bot(intents=intents)
 
-# sessions keyed by control-panel message id
+# In-memory session store and locks:
+# - loot_sessions: maps control-panel message id -> session dict
+# - session_locks: per-session asyncio.Lock to avoid race conditions
 loot_sessions: dict[int, dict] = {}
 session_locks: dict[int, asyncio.Lock] = {}
 
-# constants
-SESSION_TIMEOUT_SECONDS = 600  # 10 minutes inactivity
-TURN_NOT_STARTED = -1
+# Configuration constants
+SESSION_TIMEOUT_SECONDS = 600  # seconds of inactivity before session times out
+TURN_NOT_STARTED = -1  # sentinel for "no turn has begun yet"
 
+# emoji mapping for numbered players (1..10) + fallback for higher counts
 NUMBER_EMOJIS = {
     1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣",
     6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟"
@@ -45,13 +44,18 @@ NUMBER_EMOJIS = {
 for i in range(11, 21):
     NUMBER_EMOJIS.setdefault(i, f"#{i}")
 
-# ---------------------------
-# Small helpers
-# ---------------------------
+# ---------- Helper functions ----------
 def _are_items_left(session: dict) -> bool:
+    """Return True if any item has not yet been assigned."""
     return any(it.get("assigned_to") is None for it in session["items"])
 
 def _advance_turn_snake(session: dict) -> None:
+    """
+    Advance the current_turn index using snake draft logic.
+    If the end is reached, reverse direction and increment the round.
+    If no items remain, mark the session as complete by setting current_turn
+    beyond the last index (uses len(session['rolls'])).
+    """
     session["just_reversed"] = False
     if not _are_items_left(session):
         session["current_turn"] = len(session["rolls"])
@@ -68,12 +72,17 @@ def _advance_turn_snake(session: dict) -> None:
     if 0 <= next_turn < num:
         session["current_turn"] = next_turn
     else:
+        # reverse direction and step once in the new direction
         session["direction"] *= -1
         session["round"] += 1
         session["just_reversed"] = True
         session["current_turn"] = max(0, min(num - 1, session["current_turn"] + session["direction"]))
 
 def _build_roll_lines(rolls: list) -> str:
+    """
+    Build the text block that shows roll order and any tie-break values.
+    Returns a newline-separated string suitable for insertion into an ANSI code block.
+    """
     roll_counts = {}
     for r in rolls:
         roll_counts.setdefault(r["roll"], 0)
@@ -90,6 +99,11 @@ def _build_roll_lines(rolls: list) -> str:
     return "\n".join(parts)
 
 async def _get_msg(channel: nextcord.abc.GuildChannel | nextcord.TextChannel | None, msg_id: int):
+    """
+    Robust fetch of a message by id from a channel.
+    Tries partial-message helper first (if available) then falls back to fetch_message.
+    Returns the message object or None.
+    """
     if not channel or not msg_id:
         return None
     try:
@@ -106,10 +120,12 @@ async def _get_msg(channel: nextcord.abc.GuildChannel | nextcord.TextChannel | N
         pass
     return None
 
-# ---------------------------
-# Message builders (with ANSI colors)
-# ---------------------------
+# ---------- Message builders (use ANSI for colored output) ----------
 def build_loot_list_message(session: dict) -> str:
+    """
+    Build the left-hand 'loot list' message (1/2).
+    Shows remaining items or a completion block.
+    """
     header = f"**(1/2)**\n"
     remaining = [it for it in session["items"] if it["assigned_to"] is None]
     if remaining:
@@ -132,6 +148,10 @@ def build_loot_list_message(session: dict) -> str:
     )
 
 def build_control_panel_message(session: dict) -> str:
+    """
+    Build the control panel message (2/2) containing roll order + assigned items
+    and a short indicator about current round/direction or readiness.
+    """
     header = f"**(2/2)**\n\n✍️ **Loot Manager:** {session['invoker'].mention}\n\n"
     roll_block = (
         "```ansi\n"
@@ -141,6 +161,7 @@ def build_control_panel_message(session: dict) -> str:
         "```"
     )
 
+    # Map member id -> list of assigned item names for display
     assigned_map = {r["member"].id: [] for r in session["rolls"]}
     for it in session["items"]:
         if it["assigned_to"]:
@@ -150,6 +171,7 @@ def build_control_panel_message(session: dict) -> str:
         f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}\n"
         "==================================\n"
     )
+    # Show each roller and their assigned items. Add a blank line after each person
     for i, r in enumerate(session["rolls"]):
         emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
         assigned_block += f"{BLUE}{emoji} {r['member'].display_name}{RESET}\n"
@@ -171,6 +193,10 @@ def build_control_panel_message(session: dict) -> str:
     return f"{header}{roll_block}\n{assigned_block}{indicator}"
 
 def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
+    """
+    Build final summary that is shown either when timed out or all items assigned.
+    Includes roll order, final assigned lists, and any unclaimed items.
+    """
     header = (f"⌛ {RED}{BOLD}The loot session has timed out:{RESET}\n\n" if timed_out 
               else f"{GREEN}{BOLD}✅ All Items Have Been Assigned:{RESET}\n\n")
     roll_block = (
@@ -190,6 +216,7 @@ def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
         f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}\n"
         "==================================\n"
     )
+    # same formatting as control panel; blank line after each person's items for readability
     for i, r in enumerate(session["rolls"]):
         emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
         assigned_block += f"{BLUE}{emoji} {r['member'].display_name}{RESET}\n"
@@ -216,6 +243,10 @@ def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
     return f"{header}{roll_block}\n{assigned_block}\n{unclaimed_block}"
 
 def _item_message_text_and_active(session: dict) -> tuple[str, bool]:
+    """
+    Returns tuple (message_text, is_active) for the 'item picker' message.
+    is_active True means a picker should see a dropdown view created.
+    """
     if not _are_items_left(session) or session["current_turn"] == TURN_NOT_STARTED:
         return ("No active picks right now.", False)
     if not (0 <= session["current_turn"] < len(session["rolls"])):
@@ -225,16 +256,22 @@ def _item_message_text_and_active(session: dict) -> tuple[str, bool]:
     turn_text = "turn!" if not session.get("just_reversed", False) else "turn (direction reversed)!"
     return (f"**{emoji} {picker.mention}'s {turn_text}**\n\nChoose items below...", True)
 
-# ---------------------------
-# Views
-# ---------------------------
+# ---------- UI Views: Item dropdown view and Control panel view ----------
 class ItemDropdownView(nextcord.ui.View):
+    """
+    Dropdown view that shows all currently available items for the active picker.
+    Supports multi-chunk selects (25 options per select) and buttons for assign/skip/undo.
+    """
     def __init__(self, session_id: int):
         super().__init__(timeout=None)
         self.session_id = session_id
         self._populate()
 
     def _populate(self):
+        """
+        Build Select options and Buttons based on current session state.
+        Uses session["selected_items"] to mark previously selected options as default.
+        """
         self.clear_items()
         session = loot_sessions.get(self.session_id)
         if not session:
@@ -248,6 +285,7 @@ class ItemDropdownView(nextcord.ui.View):
         if not available:
             return
 
+        # split into 25-option chunks to respect Discord limit
         chunks = [available[i:i+25] for i in range(0, len(available), 25)]
         selected = set(session.get("selected_items") or [])
         for ci, chunk in enumerate(chunks):
@@ -260,12 +298,14 @@ class ItemDropdownView(nextcord.ui.View):
             placeholder = "Choose items..." if len(chunks) == 1 else f"Choose items ({chunk[0][1]['display_number']}-{chunk[-1][1]['display_number']})..."
             self.add_item(nextcord.ui.Select(placeholder=placeholder, options=opts, custom_id=f"item_select_{ci}", min_values=0, max_values=len(opts)))
 
+        # Buttons: Assign Selected (enabled only if something selected), Skip Turn, Undo (if available)
         assign_disabled = not session.get("selected_items")
         self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.success, emoji="✅", custom_id="assign_button", disabled=assign_disabled))
         self.add_item(nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button"))
         undo_disabled = not session.get("last_action")
         self.add_item(nextcord.ui.Button(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=undo_disabled))
 
+        # wire callbacks for each element
         for child in self.children:
             if getattr(child, "custom_id", None) == "assign_button":
                 child.callback = self.on_assign
@@ -277,6 +317,10 @@ class ItemDropdownView(nextcord.ui.View):
                 child.callback = self.on_item_select
 
     async def _fast_edit(self, interaction: nextcord.Interaction, content: str, view: nextcord.ui.View | None) -> bool:
+        """
+        Attempt quick edit via interaction.response.edit_message; fallback to fetching & editing
+        the stored item-dropdown message id, or send a new message if needed.
+        """
         session = loot_sessions.get(self.session_id)
         if not session:
             try:
@@ -317,6 +361,7 @@ class ItemDropdownView(nextcord.ui.View):
                 return False
 
     async def _ack(self, interaction: nextcord.Interaction):
+        """Helper to acknowledge interactions gracefully."""
         try:
             await interaction.response.defer_update()
         except Exception:
@@ -329,6 +374,10 @@ class ItemDropdownView(nextcord.ui.View):
                     pass
 
     async def on_item_select(self, interaction: nextcord.Interaction):
+        """
+        When user (re)selects items, persist selections into session['selected_items'].
+        Uses set arithmetic to keep selections across chunked selects.
+        """
         session = loot_sessions.get(self.session_id)
         if not session:
             await self._ack(interaction)
@@ -371,15 +420,21 @@ class ItemDropdownView(nextcord.ui.View):
         lock = session_locks.setdefault(self.session_id, asyncio.Lock())
         async with lock:
             current = set(session.get("selected_items") or [])
+            # remove any selections from this chunk (they will be replaced by new)
             current -= possible
             current |= newly
             session["selected_items"] = list(current)
 
         await self._ack(interaction)
         await _reset_session_timeout(self.session_id)
+        # refresh messages without forcing item deletion (preserve dropdown when possible)
         asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=False))
 
     async def on_assign(self, interaction: nextcord.Interaction):
+        """
+        Assign selected items to the current picker (or allow invoker to assign).
+        Records an undo snapshot in session['last_action'].
+        """
         session = loot_sessions.get(self.session_id)
         if not session:
             try:
@@ -428,9 +483,14 @@ class ItemDropdownView(nextcord.ui.View):
         new_view = ItemDropdownView(self.session_id) if active else None
 
         edited = await self._fast_edit(interaction, new_text, new_view)
+        # after assignment, force delete+recreate of the item message to ensure a fresh state
         asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
 
     async def on_skip(self, interaction: nextcord.Interaction):
+        """
+        Skip the current pick. Only the picker or invoker can skip.
+        Records undo state if appropriate.
+        """
         session = loot_sessions.get(self.session_id)
         if not session:
             try:
@@ -472,6 +532,10 @@ class ItemDropdownView(nextcord.ui.View):
         asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
 
     async def on_undo(self, interaction: nextcord.Interaction):
+        """
+        Undo the last assign/skip action. Only the Loot Manager (invoker) can undo.
+        Restores assigned items referenced in last_action.
+        """
         session = loot_sessions.get(self.session_id)
         if not session:
             try:
@@ -513,12 +577,20 @@ class ItemDropdownView(nextcord.ui.View):
         asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
 
 class ControlPanelView(nextcord.ui.View):
+    """
+    Control panel used by the Loot Manager to remove participants or start assignment.
+    Only the invoker can interact with these controls (enforced by interaction_check).
+    """
     def __init__(self, session_id: int):
         super().__init__(timeout=None)
         self.session_id = session_id
         self._populate()
 
     def _populate(self):
+        """
+        Populate remove-select and start button when the session hasn't started.
+        Uses session['members_to_remove'] (list[str]) to keep defaults for the select.
+        """
         self.clear_items()
         session = loot_sessions.get(self.session_id)
         if not session:
@@ -546,6 +618,9 @@ class ControlPanelView(nextcord.ui.View):
                 child.callback = self.on_start
 
     async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
+        """
+        Only the session invoker can interact with the control panel; others receive an ephemeral notice.
+        """
         session = loot_sessions.get(self.session_id)
         if not session:
             try:
@@ -562,6 +637,9 @@ class ControlPanelView(nextcord.ui.View):
         return False
 
     async def on_remove_select(self, interaction: nextcord.Interaction):
+        """
+        Persist removal selections into session['members_to_remove'] (list[str]) and re-render view.
+        """
         session = loot_sessions.get(self.session_id)
         if not session:
             try:
@@ -569,7 +647,6 @@ class ControlPanelView(nextcord.ui.View):
             except Exception:
                 pass
             return
-        # store as list of strings to match SelectOption.values
         vals = interaction.data.get("values") or []
         session["members_to_remove"] = list(vals)
         self._populate()
@@ -582,6 +659,10 @@ class ControlPanelView(nextcord.ui.View):
                 pass
 
     async def on_remove_confirm(self, interaction: nextcord.Interaction):
+        """
+        Remove chosen participants from session['rolls']. If no participants remain,
+        cancel the session and clean up messages and tasks.
+        """
         session = loot_sessions.get(self.session_id)
         if not session:
             try:
@@ -643,6 +724,9 @@ class ControlPanelView(nextcord.ui.View):
         asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
 
     async def on_start(self, interaction: nextcord.Interaction):
+        """
+        Start the assignment process by advancing to the first turn.
+        """
         session = loot_sessions.get(self.session_id)
         if not session:
             try:
@@ -661,10 +745,11 @@ class ControlPanelView(nextcord.ui.View):
             pass
         asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
 
-# ---------------------------
-# Message lifecycle / refresh / timeout
-# ---------------------------
+# ---------- Message lifecycle, refresh, and timeout ----------
 async def _reset_session_timeout(session_id: int):
+    """
+    Cancel any existing timeout task and schedule a fresh timeout for the session.
+    """
     session = loot_sessions.get(session_id)
     if not session:
         return
@@ -677,6 +762,14 @@ async def _reset_session_timeout(session_id: int):
     session["timeout_task"] = asyncio.create_task(_schedule_session_timeout(session_id))
 
 async def _refresh_all_messages(session_id: int, delete_item: bool = True):
+    """
+    Synchronize the three messages for the session:
+      - loot list (left)
+      - control panel (right)
+      - item dropdown (third, recreated as requested)
+    The delete_item flag controls whether the third message is forcibly deleted
+    and recreated (used to force a fresh view).
+    """
     session = loot_sessions.get(session_id)
     if not session:
         return
@@ -701,6 +794,7 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
         if existing_item_id:
             existing_item_msg = await _get_msg(ch, existing_item_id)
 
+        # Optionally delete the item message to force a clean recreate.
         if delete_item and existing_item_msg:
             try:
                 await existing_item_msg.delete()
@@ -710,6 +804,7 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             existing_item_msg = None
             existing_item_id = None
 
+        # If distribution complete, show final summary and cleanup session.
         if not _are_items_left(session) and session["current_turn"] != TURN_NOT_STARTED:
             final = build_final_summary_message(session, timed_out=False)
             try:
@@ -744,6 +839,7 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             session_locks.pop(session_id, None)
             return
 
+        # Build current contents and only edit messages if changed to reduce API calls.
         loot_content = build_loot_list_message(session)
         control_content = build_control_panel_message(session)
 
@@ -763,6 +859,7 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
 
         await _reset_session_timeout(session_id)
 
+        # Manage item-picking message: create if active, delete/skip if not
         is_active = (0 <= session["current_turn"] < len(session["rolls"])) and _are_items_left(session)
         if not is_active:
             if not delete_item and existing_item_msg:
@@ -780,6 +877,7 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
 
         view = ItemDropdownView(session_id)
 
+        # Either edit the existing item message (if allowed) or send a fresh one.
         if existing_item_msg and not delete_item:
             try:
                 await existing_item_msg.edit(content=item_text, view=view)
@@ -796,6 +894,10 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             session["item_dropdown_message_id"] = None
 
 async def _schedule_session_timeout(session_id: int):
+    """
+    Sleep for SESSION_TIMEOUT_SECONDS and then expire/cleanup the session.
+    This removes the temporary messages and edits the control message with a timed-out summary.
+    """
     try:
         await asyncio.sleep(SESSION_TIMEOUT_SECONDS)
     except asyncio.CancelledError:
@@ -828,10 +930,12 @@ async def _schedule_session_timeout(session_id: int):
     except Exception:
         pass
 
-# ---------------------------
-# Modal & slash command
-# ---------------------------
+# ---------- Modal and command logic ----------
 class LootModal(nextcord.ui.Modal):
+    """
+    Modal requesting an item list from the invoker.
+    Format supports simple 'Nx ItemName' lines (e.g., '2x Health Potion').
+    """
     def __init__(self):
         super().__init__("RNGenie Loot Manager")
         self.loot_items = nextcord.ui.TextInput(
@@ -844,6 +948,10 @@ class LootModal(nextcord.ui.Modal):
         self.add_item(self.loot_items)
 
     async def callback(self, interaction: nextcord.Interaction):
+        """
+        Modal callback performs safety checks and initializes the session.
+        It also creates the three messages (loot list, control panel, and item dropdown).
+        """
         channel_type = getattr(interaction.channel, "type", None)
         if channel_type in (nextcord.ChannelType.voice, nextcord.ChannelType.stage_voice):
             await interaction.response.send_message("❌ Please run `/loot` in a regular text channel (not a voice-linked text chat).", ephemeral=True)
@@ -863,6 +971,7 @@ class LootModal(nextcord.ui.Modal):
             await interaction.followup.send(f"❌ Too many users in the voice channel ({len(members)})! The maximum is 20.", ephemeral=True)
             return
 
+        # Roll generation with random tie-breakers for equal primary rolls
         rolls = [{"member": m, "roll": random.randint(1, 100)} for m in members]
         by_roll = {}
         for r in rolls:
@@ -876,6 +985,7 @@ class LootModal(nextcord.ui.Modal):
             return (r["roll"], r.get("tiebreak", -1))
         rolls.sort(key=_sort_key, reverse=True)
 
+        # Parse the modal input for items; support Nx syntax
         lines = self.loot_items.value.splitlines()
         names = []
         for l in lines:
@@ -901,6 +1011,7 @@ class LootModal(nextcord.ui.Modal):
             await interaction.followup.send("⚠️ You must enter at least one item.", ephemeral=True)
             return
 
+        # send placeholders and then initialize session state
         loot_msg = await interaction.followup.send("`Initializing Loot List (1/2)...`", wait=True)
         control_msg = await interaction.channel.send("`Initializing Control Panel (2/2)...`")
 
@@ -932,25 +1043,49 @@ class LootModal(nextcord.ui.Modal):
         session["last_control_content"] = build_control_panel_message(session)
         session["last_loot_content"] = build_loot_list_message(session)
 
+        # create item dropdown via refresh task (delete/create behavior handled there)
         asyncio.create_task(_refresh_all_messages(session_id, delete_item=True))
 
 @bot.slash_command(name="loot", description="Starts a turn-based loot roll for your voice channel.")
 async def loot(interaction: nextcord.Interaction):
+    """
+    Slash command to open the Loot modal. Performs a pre-modal check to ensure the
+    invoker is in a voice channel (better UX: prevents showing a modal they cannot use).
+    """
+    # disallow invoking the command in voice-linked text chats
     ch_type = getattr(interaction.channel, "type", None)
     if ch_type in (nextcord.ChannelType.voice, nextcord.ChannelType.stage_voice):
-        await interaction.response.send_message("❌ Please run `/loot` in a regular text channel (not a voice-linked text chat).", ephemeral=True)
+        await interaction.response.send_message(
+            "❌ Please run `/loot` in a regular text channel (not a voice-linked text chat).",
+            ephemeral=True
+        )
         return
+
+    # require the invoking user to be connected to a voice channel before showing modal
+    user_voice = getattr(interaction.user, "voice", None)
+    user_voice_chan = getattr(user_voice, "channel", None)
+    if not user_voice_chan:
+        await interaction.response.send_message(
+            "❌ You must be in a voice channel to start a loot roll. Join a voice channel and try again.",
+            ephemeral=True
+        )
+        return
+
+    # show the modal (modal callback does additional defensive checks)
     await interaction.response.send_modal(LootModal())
 
-# ---------------------------
-# Events
-# ---------------------------
+# ---------- Events and run ----------
 @bot.event
 async def on_ready():
+    """Log a minimal ready message when the bot connects."""
     print(f"RNGenie ready as {bot.user}")
 
 @bot.event
 async def on_application_command_error(interaction: nextcord.Interaction, error: Exception):
+    """
+    Generic application command error handler that sends a simple ephemeral notice.
+    Keeps behavior minimal to avoid noisy logging.
+    """
     try:
         if not interaction.is_expired():
             if interaction.response.is_done():
@@ -960,10 +1095,8 @@ async def on_application_command_error(interaction: nextcord.Interaction, error:
     except Exception:
         pass
 
-# ---------------------------
-# Run
-# ---------------------------
 if __name__ == "__main__":
+    # Load token from .env and run the bot
     load_dotenv()
     token = os.getenv("DISCORD_TOKEN")
     if not token:
