@@ -336,7 +336,7 @@ class ItemDropdownView(nextcord.ui.View):
             return True
         except Exception:
             try:
-                await interaction.response.defer_update()
+                await interaction.response.defer()
             except Exception:
                 try:
                     await interaction.response.send_message("Processing...", ephemeral=True)
@@ -365,7 +365,7 @@ class ItemDropdownView(nextcord.ui.View):
     async def _ack(self, interaction: nextcord.Interaction):
         """Helper to acknowledge interactions gracefully."""
         try:
-            await interaction.response.defer_update()
+            await interaction.response.defer()
         except Exception:
             try:
                 await interaction.response.defer(ephemeral=True)
