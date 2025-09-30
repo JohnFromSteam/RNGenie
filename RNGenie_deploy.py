@@ -164,8 +164,9 @@ def build_loot_list_body(session: dict) -> str:
         body += "\n"
 
     if assigned:
-        body += f"{GREEN}{BOLD}✅ Assigned Items (Recent) ✅{RESET}\n"
-        body += "==================================\n"
+        # Append previously assigned items to the bottom of the list.
+        # The explicit "Assigned Items (Recent)" header is redundant because
+        # the Finalize/Last Assigned block already highlights the most recent assignment.
         for it in assigned:
             body += f"{GREEN}{it['display_number']}.{RESET} {it['name']}\n"
 
@@ -555,32 +556,48 @@ class ItemDropdownView(nextcord.ui.View):
             return
 
         selected = session.get("selected_items") or []
+
+        # Record undo snapshot using both indices and stable display numbers
+        assigned_indices = [int(i) for i in selected] if selected else []
+        assigned_numbers = []
+        for i in assigned_indices:
+            if 0 <= i < len(session["items"]):
+                assigned_numbers.append(session["items"][i].get("display_number"))
+
         session["last_action"] = {
             "turn": session["current_turn"],
             "round": session["round"],
             "direction": session["direction"],
             "just_reversed": session.get("just_reversed", False),
-            "assigned_indices": [int(i) for i in selected] if selected else []
+            "assigned_indices": assigned_indices,
+            "assigned_numbers": assigned_numbers
         }
 
-        for s in selected:
-            try:
-                idx = int(s)
-            except Exception:
-                continue
-            if 0 <= idx < len(session["items"]):
-                session["items"][idx]["assigned_to"] = picker.id
+        # Acknowledge the interaction then delete the current picker message so
+        # it disappears while we sync other messages. Ignore any delete errors.
+        await self._ack(interaction)
+        try:
+            if interaction.message:
+                await interaction.message.delete()
+        except Exception:
+            pass
+
+        # Move the selected items to the bottom and mark them assigned to the picker
+        if assigned_numbers:
+            mapping = {it.get("display_number"): it for it in session["items"]}
+            assigned_items = [mapping[n] for n in assigned_numbers if n in mapping]
+            for it in assigned_items:
+                it["assigned_to"] = picker.id
+            remaining = [it for it in session["items"] if it.get("display_number") not in set(assigned_numbers)]
+            session["items"] = remaining + assigned_items
 
         session["selected_items"] = None
         _advance_turn_snake(session)
         await _reset_session_timeout(self.session_id)
 
-        new_text, active = _item_message_text_and_active(session)
-        new_view = ItemDropdownView(self.session_id) if active else None
-
-        edited = await self._fast_edit(interaction, new_text, new_view)
-        # after assignment, force delete+recreate of the item message to ensure a fresh state
-        _schedule_refresh(self.session_id, delete_item=True)
+        # Recreate the picker after other messages have been synced. We deleted
+        # the picker above, so schedule a refresh that will create it (delete_item=False).
+        _schedule_refresh(self.session_id, delete_item=False)
 
     async def on_skip(self, interaction: nextcord.Interaction):
         """
@@ -618,14 +635,19 @@ class ItemDropdownView(nextcord.ui.View):
             session["members_to_remove"] = None
             session["last_action"] = None
 
+        # Acknowledge and delete the current picker so it isn't visible while
+        # we sync the loot/control messages.
+        await self._ack(interaction)
+        try:
+            if interaction.message:
+                await interaction.message.delete()
+        except Exception:
+            pass
+
         _advance_turn_snake(session)
         await _reset_session_timeout(self.session_id)
 
-        new_text, active = _item_message_text_and_active(session)
-        new_view = ItemDropdownView(self.session_id) if active else None
-
-        await self._fast_edit(interaction, new_text, new_view)
-        _schedule_refresh(self.session_id, delete_item=True)
+        _schedule_refresh(self.session_id, delete_item=False)
 
     async def on_undo(self, interaction: nextcord.Interaction):
         """
@@ -655,9 +677,26 @@ class ItemDropdownView(nextcord.ui.View):
                 pass
             return
 
-        for idx in last.get("assigned_indices", []):
-            if 0 <= idx < len(session["items"]):
-                session["items"][idx]["assigned_to"] = None
+        # Prefer stable display numbers for undoing since indices may have shifted
+        assigned_numbers = last.get("assigned_numbers") or []
+        if not assigned_numbers:
+            # Fallback: convert stored indices to display numbers where possible
+            for idx in last.get("assigned_indices", []):
+                if 0 <= idx < len(session["items"]):
+                    num = session["items"][idx].get("display_number")
+                    if num:
+                        assigned_numbers.append(num)
+
+        if assigned_numbers:
+            for num in assigned_numbers:
+                for it in session["items"]:
+                    if it.get("display_number") == num:
+                        it["assigned_to"] = None
+                        break
+            # Rebuild ordering: remaining then assigned
+            remaining = [it for it in session["items"] if it["assigned_to"] is None]
+            assigned = [it for it in session["items"] if it["assigned_to"]]
+            session["items"] = remaining + assigned
 
         session["current_turn"] = last["turn"]
         session["round"] = last["round"]
@@ -667,10 +706,8 @@ class ItemDropdownView(nextcord.ui.View):
         session["selected_items"] = None
 
         await _reset_session_timeout(self.session_id)
-        new_text, active = _item_message_text_and_active(session)
-        new_view = ItemDropdownView(self.session_id) if active else None
-        await self._fast_edit(interaction, new_text, new_view)
-        _schedule_refresh(self.session_id, delete_item=True)
+        await self._ack(interaction)
+        _schedule_refresh(self.session_id, delete_item=False)
 
 class ControlPanelView(nextcord.ui.View):
     """
