@@ -4,6 +4,7 @@ import os
 import random
 import re
 import asyncio
+import typing
 import time
 from dotenv import load_dotenv
 import nextcord
@@ -53,6 +54,19 @@ for i in range(11, 21):
 def _are_items_left(session: dict) -> bool:
     """Return True if any item has not yet been assigned."""
     return any(it.get("assigned_to") is None for it in session["items"])
+
+
+def _schedule_bg_task(session_id: int, coro: typing.Awaitable) -> asyncio.Task | None:
+    """Schedule a background task and store a reference on the session to avoid
+    premature garbage collection. Returns the created Task or None on error."""
+    session = loot_sessions.get(session_id)
+    try:
+        t = asyncio.create_task(coro)
+        if session is not None:
+            session.setdefault("_bg_tasks", []).append(t)
+        return t
+    except Exception:
+        return None
 
 def _advance_turn_snake(session: dict) -> None:
     """
@@ -532,7 +546,12 @@ class ItemDropdownView(nextcord.ui.View):
         # Persist selection and acknowledge; do not attempt to programmatically
         # collapse the dropdown (client behavior is inconsistent).
         await self._ack(interaction)
-        await _reset_session_timeout(self.session_id)
+        # Reset the session timeout in the background to avoid blocking the
+        # interaction response; this keeps the UI responsive for the user.
+        try:
+            _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
+        except Exception:
+            pass
         # refresh messages without forcing item deletion (preserve dropdown when possible)
         _schedule_refresh(self.session_id, delete_item=False)
 
@@ -583,11 +602,13 @@ class ItemDropdownView(nextcord.ui.View):
         }
 
         # Acknowledge the interaction then delete the current picker message so
-        # it disappears while we sync other messages. Ignore any delete errors.
+        # it disappears while we sync other messages. Do the delete in the
+        # background to avoid blocking the interaction flow.
         await self._ack(interaction)
         try:
-            if interaction.message:
-                await interaction.message.delete()
+            msg = getattr(interaction, "message", None)
+            if msg:
+                _schedule_bg_task(self.session_id, msg.delete())
         except Exception:
             pass
 
@@ -602,7 +623,11 @@ class ItemDropdownView(nextcord.ui.View):
 
         session["selected_items"] = None
         _advance_turn_snake(session)
-        await _reset_session_timeout(self.session_id)
+        # Reset timeout in background so the handler returns quickly
+        try:
+            _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
+        except Exception:
+            pass
 
         # Recreate the picker after other messages have been synced. We deleted
         # the picker above, so schedule a refresh that will create it (delete_item=False).
@@ -645,16 +670,21 @@ class ItemDropdownView(nextcord.ui.View):
             session["last_action"] = None
 
         # Acknowledge and delete the current picker so it isn't visible while
-        # we sync the loot/control messages.
+        # we sync the loot/control messages. Perform deletion in background
+        # to keep the interaction responsive.
         await self._ack(interaction)
         try:
-            if interaction.message:
-                await interaction.message.delete()
+            msg = getattr(interaction, "message", None)
+            if msg:
+                _schedule_bg_task(self.session_id, msg.delete())
         except Exception:
             pass
 
         _advance_turn_snake(session)
-        await _reset_session_timeout(self.session_id)
+        try:
+            _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
+        except Exception:
+            pass
 
         _schedule_refresh(self.session_id, delete_item=False)
 
@@ -714,8 +744,12 @@ class ItemDropdownView(nextcord.ui.View):
         session["last_action"] = None
         session["selected_items"] = None
 
-        await _reset_session_timeout(self.session_id)
+        # Acknowledge immediately, reset timeout in background, then refresh.
         await self._ack(interaction)
+        try:
+            _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
+        except Exception:
+            pass
         _schedule_refresh(self.session_id, delete_item=False)
 
 class ControlPanelView(nextcord.ui.View):
@@ -824,24 +858,34 @@ class ControlPanelView(nextcord.ui.View):
             session["members_to_remove"] = None
             if not session["rolls"]:
                 ch = bot.get_channel(session["channel_id"])
+                # Delete messages in background to avoid blocking this handler
                 try:
-                    lm = await _get_msg(ch, session.get("loot_list_message_id"))
-                    if lm:
-                        await lm.delete()
+                    lm_id = session.get("loot_list_message_id")
+                    it_id = session.get("item_dropdown_message_id")
+                    ctrl_id = self.session_id
+                    async def _cleanup_cancel():
+                        try:
+                            lm = await _get_msg(ch, lm_id)
+                            if lm:
+                                await lm.delete()
+                        except Exception:
+                            pass
+                        try:
+                            it = await _get_msg(ch, it_id)
+                            if it:
+                                await it.delete()
+                        except Exception:
+                            pass
+                        try:
+                            ctrl = await _get_msg(ch, ctrl_id)
+                            if ctrl:
+                                await ctrl.edit(content="⚠️ The loot session was cancelled — no participants remain.", view=None)
+                        except Exception:
+                            pass
+                    _schedule_bg_task(self.session_id, _cleanup_cancel())
                 except Exception:
                     pass
-                try:
-                    it = await _get_msg(ch, session.get("item_dropdown_message_id"))
-                    if it:
-                        await it.delete()
-                except Exception:
-                    pass
-                try:
-                    ctrl = await _get_msg(ch, self.session_id)
-                    if ctrl:
-                        await ctrl.edit(content="⚠️ The loot session was cancelled — no participants remain.", view=None)
-                except Exception:
-                    pass
+                # cancel timeout task if present (best-effort)
                 t = session.get("timeout_task")
                 if t:
                     try:
@@ -858,7 +902,11 @@ class ControlPanelView(nextcord.ui.View):
             if session["current_turn"] != TURN_NOT_STARTED and session["current_turn"] >= len(session["rolls"]):
                 session["current_turn"] = max(0, len(session["rolls"]) - 1)
 
-        await _reset_session_timeout(self.session_id)
+        # Reset timeout in background and quickly defer the response
+        try:
+            _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
+        except Exception:
+            pass
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception:
@@ -880,7 +928,10 @@ class ControlPanelView(nextcord.ui.View):
         session["selected_items"] = None
         session["last_action"] = None
         _advance_turn_snake(session)
-        await _reset_session_timeout(self.session_id)
+        try:
+            _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
+        except Exception:
+            pass
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception:
@@ -956,27 +1007,40 @@ class FinalizeView(nextcord.ui.View):
             pass
 
         # delete loot list message
+        # Delete loot list message in background (best-effort)
         try:
-            lm = await _get_msg(ch, session.get("loot_list_message_id"))
-            if lm:
-                await lm.delete()
+            loot_id = session.get("loot_list_message_id")
+            async def _del_loot():
+                try:
+                    lm = await _get_msg(ch, loot_id)
+                    if lm:
+                        await lm.delete()
+                except Exception:
+                    pass
+            _schedule_bg_task(self.session_id, _del_loot())
         except Exception:
             pass
 
         # delete any item message (this finalize message included)
+        # Delete the item dropdown (finalize message) in background
         try:
-            existing = session.get("item_dropdown_message_id")
-            if existing:
-                maybe = await _get_msg(ch, existing)
-                if maybe:
-                    try:
-                        await maybe.delete()
-                    except Exception:
-                        pass
+            item_id = session.get("item_dropdown_message_id")
+            async def _del_item():
+                try:
+                    maybe = await _get_msg(ch, item_id)
+                    if maybe:
+                        try:
+                            await maybe.delete()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            _schedule_bg_task(self.session_id, _del_item())
         except Exception:
             pass
 
         # cancel timeout and remove session
+        # Cancel timeout task (best-effort)
         t = session.get("timeout_task")
         if t:
             try:
@@ -1041,20 +1105,27 @@ class FinalizeView(nextcord.ui.View):
         session["last_action"] = None
         session["selected_items"] = None
 
-        # reset timeout
-        await _reset_session_timeout(self.session_id)
+        # reset timeout (background) to avoid blocking the interaction
+        try:
+            _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
+        except Exception:
+            pass
 
         # delete the finalize message and recreate the normal item dropdown flow
         ch = bot.get_channel(session["channel_id"])
         try:
-            existing = session.get("item_dropdown_message_id")
-            if existing:
-                maybe = await _get_msg(ch, existing)
-                if maybe:
-                    try:
-                        await maybe.delete()
-                    except Exception:
-                        pass
+            item_id = session.get("item_dropdown_message_id")
+            async def _del_item2():
+                try:
+                    maybe = await _get_msg(ch, item_id)
+                    if maybe:
+                        try:
+                            await maybe.delete()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            _schedule_bg_task(self.session_id, _del_item2())
         except Exception:
             pass
         session["item_dropdown_message_id"] = None
