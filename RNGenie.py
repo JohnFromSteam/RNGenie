@@ -38,8 +38,8 @@ SESSION_TIMEOUT_SECONDS = 600  # seconds of inactivity before session times out
 TURN_NOT_STARTED = -1  # sentinel for "no turn has begun yet"
 
 # How long to wait to coalesce multiple refresh requests (seconds)
-# Use 1.0s as the debounce/grace window per UX request
-REFRESH_DEBOUNCE_SECONDS = 1.0
+# Use 0.5s as the debounce/grace window per latest UX request
+REFRESH_DEBOUNCE_SECONDS = 0.5
 
 # emoji mapping for numbered players (1..10) + fallback for higher counts
 NUMBER_EMOJIS = {
@@ -529,17 +529,8 @@ class ItemDropdownView(nextcord.ui.View):
             current |= newly
             session["selected_items"] = list(current)
 
-        # Try to collapse the dropdown on selection by editing the message to remove the view.
-        try:
-            if interaction.message:
-                try:
-                    await interaction.message.edit(view=None)
-                except Exception:
-                    # best-effort: ignore edit errors
-                    pass
-        except Exception:
-            pass
-
+        # Persist selection and acknowledge; do not attempt to programmatically
+        # collapse the dropdown (client behavior is inconsistent).
         await self._ack(interaction)
         await _reset_session_timeout(self.session_id)
         # refresh messages without forcing item deletion (preserve dropdown when possible)
