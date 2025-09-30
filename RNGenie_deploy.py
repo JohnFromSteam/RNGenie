@@ -130,17 +130,10 @@ def build_loot_list_message(session: dict) -> str:
     Shows remaining items or a completion block.
     """
     header = f"**(1/2)**\n"
-    remaining = [it for it in session["items"] if it["assigned_to"] is None]
-    if remaining:
-        body = (
-            "```ansi\n"
-            f"{RED}{BOLD}❌ Remaining Loot Items ❌{RESET}\n"
-            "==================================\n"
-        )
-        for it in remaining:
-            body += f"{RED}{it['display_number']}.{RESET} {it['name']}\n"
-        body += "```"
+    body = build_loot_list_body(session)
+    if body:
         return f"{header}{body}"
+    # Fallback: no items present
     return (
         f"{header}"
         "```ansi\n"
@@ -149,6 +142,55 @@ def build_loot_list_message(session: dict) -> str:
         "All items have been distributed.\n"
         "```"
     )
+
+
+def build_loot_list_body(session: dict) -> str:
+    """Return the body (without header) for the loot list: remaining items
+    followed by assigned items appended at the end."""
+    remaining = [it for it in session["items"] if it["assigned_to"] is None]
+    assigned = [it for it in session["items"] if it["assigned_to"]]
+
+    # If there are any items, compose a single code block listing remaining
+    # items first, then assigned items appended below.
+    if not remaining and not assigned:
+        return ""
+
+    body = "```ansi\n"
+    if remaining:
+        body += f"{RED}{BOLD}❌ Remaining Loot Items ❌{RESET}\n"
+        body += "==================================\n"
+        for it in remaining:
+            body += f"{RED}{it['display_number']}.{RESET} {it['name']}\n"
+        body += "\n"
+
+    if assigned:
+        body += f"{GREEN}{BOLD}✅ Assigned Items (Recent) ✅{RESET}\n"
+        body += "==================================\n"
+        for it in assigned:
+            body += f"{GREEN}{it['display_number']}.{RESET} {it['name']}\n"
+
+    body += "```"
+    return body
+
+
+def build_last_assigned_block(session: dict) -> str:
+    """Return a code-block string (no header) containing the last assigned items.
+    If no last_action snapshot exists, return an empty string."""
+    last = session.get("last_action") or {}
+    indices = last.get("assigned_indices") or []
+    if not indices:
+        return ""
+    body = (
+        "```ansi\n"
+        f"{MAGENTA}{BOLD}📝 Last Assigned Loot Items 📝{RESET}\n"
+        "==================================\n"
+    )
+    for idx in indices:
+        if 0 <= idx < len(session["items"]):
+            it = session["items"][idx]
+            body += f"{MAGENTA}{it['display_number']}.{RESET} {it['name']}\n"
+    body += "```"
+    return body
 
 def build_last_assigned_message(session: dict) -> str:
     """
@@ -173,7 +215,16 @@ def build_last_assigned_message(session: dict) -> str:
             it = session["items"][idx]
             body += f"{MAGENTA}{it['display_number']}.{RESET} {it['name']}\n"
     body += "```"
-    return f"{header}{body}"
+    final = header + body
+    # append expiry timer if available
+    expires = session.get("expires_at")
+    if expires:
+        try:
+            ts = int(expires)
+            final += f"\n⏳ Expires: <t:{ts}:R>"
+        except Exception:
+            pass
+    return final
 
 def build_control_panel_message(session: dict) -> str:
     """
@@ -276,7 +327,16 @@ def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
         for it in unclaimed:
             unclaimed_block += f"{RED}{it['display_number']}.{RESET} {it['name']}\n"
         unclaimed_block += "```"
-    return f"{header}{roll_block}\n{assigned_block}\n{unclaimed_block}"
+    final = f"{header}{roll_block}\n{assigned_block}\n{unclaimed_block}"
+    # append expiry timer if available (useful when showing finalize UI)
+    expires = session.get("expires_at")
+    if expires:
+        try:
+            ts = int(expires)
+            final += f"\n⏳ Expires: <t:{ts}:R>"
+        except Exception:
+            pass
+    return final
 
 def _item_message_text_and_active(session: dict) -> tuple[str, bool]:
     """
@@ -1014,9 +1074,8 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             # so the control panel shows the 10-minute expiry timer for the invoker.
             await _reset_session_timeout(session_id)
 
-
-            # build final control content and edit control message (only if changed)
-            final_ctrl = build_control_panel_message(session)
+            # build final control content and edit control message (show final summary)
+            final_ctrl = build_final_summary_message(session, timed_out=False)
             try:
                 if control_msg and final_ctrl != session.get("last_control_content"):
                     await control_msg.edit(content=final_ctrl)
@@ -1024,10 +1083,48 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             except Exception:
                 pass
 
+            # show the 'Last Assigned Loot Items' in the left loot list so the
+            # invoker can see what was most recently assigned before finishing.
+            try:
+                last_block = build_last_assigned_block(session)
+                body = build_loot_list_body(session)
+                combined = "**(1/2)**\n"
+                if last_block:
+                    combined += last_block + "\n"
+                if body:
+                    combined += body
+
+                # append expiry timer if available
+                expires = session.get("expires_at")
+                if expires:
+                    try:
+                        ts = int(expires)
+                        combined += f"\n⏳ Expires: <t:{ts}:R>"
+                    except Exception:
+                        pass
+
+                if loot_msg and combined != session.get("last_loot_content"):
+                    await loot_msg.edit(content=combined)
+                    session["last_loot_content"] = combined
+            except Exception:
+                pass
+
+            # mark that finalize UI is shown so timeout handling knows how to
+            # collapse the last-assigned view into the merged final state.
+            session["finalize_shown"] = True
+
             # present the finalize message to the invoker (third message) with FinalizeView
-            finalize_text = f"✍️ {session['invoker'].mention}\n\nClick an action below to finish or undo the last assignment."
+            expires = session.get("expires_at")
+            timer_line = ""
+            if expires:
+                try:
+                    ts = int(expires)
+                    timer_line = f"\n\n⏳ Expires: <t:{ts}:R>"
+                except Exception:
+                    timer_line = ""
+            finalize_text = f"✍️ {session['invoker'].mention}\n\nClick an action below to finish or undo the last assignment." + timer_line
             finalize_view = FinalizeView(session_id)
-            
+
             # delete any existing item message (we'll replace it with finalize)
             if existing_item_msg:
                 try:
