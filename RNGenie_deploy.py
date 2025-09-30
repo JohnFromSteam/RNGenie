@@ -1174,7 +1174,7 @@ async def _reset_session_timeout(session_id: int):
     except Exception:
         session["expires_at"] = None
 
-async def _refresh_all_messages(session_id: int, delete_item: bool = True):
+async def _refresh_all_messages(session_id: int, delete_item: bool = True, ignore_last_del: bool = False):
     """
     Synchronize the three messages for the session:
       - loot list (left)
@@ -1308,21 +1308,30 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
         loot_content = build_loot_list_message(session)
         control_content = build_control_panel_message(session)
 
-        if loot_content != session.get("last_loot_content") and loot_msg:
-            try:
-                await loot_msg.edit(content=loot_content)
-                session["last_loot_content"] = loot_content
-            except Exception:
-                pass
+        # Edit loot message in background to avoid blocking the picker creation.
+        if loot_msg:
+            async def _bg_edit_loot():
+                try:
+                    if loot_content != session.get("last_loot_content"):
+                        await loot_msg.edit(content=loot_content)
+                        session["last_loot_content"] = loot_content
+                except Exception:
+                    pass
+            _schedule_bg_task(session_id, _bg_edit_loot())
 
-        if control_content != session.get("last_control_content") and control_msg:
-            try:
-                await control_msg.edit(content=control_content, view=ControlPanelView(session_id))
-                session["last_control_content"] = control_content
-            except Exception:
-                pass
+        # Edit control message in background as well.
+        if control_msg:
+            async def _bg_edit_control():
+                try:
+                    if control_content != session.get("last_control_content"):
+                        await control_msg.edit(content=control_content, view=ControlPanelView(session_id))
+                        session["last_control_content"] = control_content
+                except Exception:
+                    pass
+            _schedule_bg_task(session_id, _bg_edit_control())
 
-        await _reset_session_timeout(session_id)
+        # Reset timeout in background to avoid blocking the refresh.
+        _schedule_bg_task(session_id, _reset_session_timeout(session_id))
 
         # Manage item-picking message: create if active, delete/skip if not
         is_active = (0 <= session["current_turn"] < len(session["rolls"])) and _are_items_left(session)
@@ -1344,30 +1353,48 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
 
         # Either edit the existing item message (if allowed) or send a fresh one.
         if existing_item_msg and not delete_item:
-            try:
-                await existing_item_msg.edit(content=item_text, view=view)
-                session["item_dropdown_message_id"] = existing_item_id
-                return
-            except Exception:
-                session["item_dropdown_message_id"] = None
-                existing_item_msg = None
+            # Try editing the existing item message but do it in background
+            async def _bg_edit_item_existing():
+                try:
+                    await existing_item_msg.edit(content=item_text, view=view)
+                    session["item_dropdown_message_id"] = existing_item_id
+                except Exception:
+                    try:
+                        session["item_dropdown_message_id"] = None
+                    except Exception:
+                        pass
+            _schedule_bg_task(session_id, _bg_edit_item_existing())
+            return
 
         # Ensure we wait at least REFRESH_DEBOUNCE_SECONDS after the most recent
         # deletion to avoid racey UI where the new picker appears before other edits finish.
-        last_del = session.get("last_item_deleted_at")
-        if last_del:
-            try:
-                elapsed = time.time() - float(last_del)
-                if elapsed < REFRESH_DEBOUNCE_SECONDS:
-                    await asyncio.sleep(REFRESH_DEBOUNCE_SECONDS - elapsed)
-            except Exception:
-                pass
+        # Optionally wait a short grace period after deletions to avoid
+        # racey UI where the new picker appears before other edits finish.
+        # Immediate refresh callers can bypass this by setting ignore_last_del.
+        if not ignore_last_del:
+            last_del = session.get("last_item_deleted_at")
+            if last_del:
+                try:
+                    elapsed = time.time() - float(last_del)
+                    if elapsed < REFRESH_DEBOUNCE_SECONDS:
+                        await asyncio.sleep(REFRESH_DEBOUNCE_SECONDS - elapsed)
+                except Exception:
+                    pass
 
-        try:
-            new_msg = await ch.send(item_text, view=view)
-            session["item_dropdown_message_id"] = new_msg.id
-        except Exception:
-            session["item_dropdown_message_id"] = None
+        # Send the item picker in the background and return immediately so
+        # the refresh call is fast. The background task will set the
+        # session['item_dropdown_message_id'] when successful.
+        async def _bg_send_item():
+            try:
+                new_msg = await ch.send(item_text, view=view)
+                session["item_dropdown_message_id"] = new_msg.id
+            except Exception:
+                try:
+                    session["item_dropdown_message_id"] = None
+                except Exception:
+                    pass
+        _schedule_bg_task(session_id, _bg_send_item())
+        return
 
 
 def _schedule_refresh(session_id: int, delete_item: bool = True) -> asyncio.Task | None:
