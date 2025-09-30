@@ -439,7 +439,7 @@ class ItemDropdownView(nextcord.ui.View):
         await self._ack(interaction)
         await _reset_session_timeout(self.session_id)
         # refresh messages without forcing item deletion (preserve dropdown when possible)
-        asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=False))
+        _schedule_refresh(self.session_id, delete_item=False)
 
     async def on_assign(self, interaction: nextcord.Interaction):
         """
@@ -495,7 +495,7 @@ class ItemDropdownView(nextcord.ui.View):
 
         edited = await self._fast_edit(interaction, new_text, new_view)
         # after assignment, force delete+recreate of the item message to ensure a fresh state
-        asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
+        _schedule_refresh(self.session_id, delete_item=True)
 
     async def on_skip(self, interaction: nextcord.Interaction):
         """
@@ -540,7 +540,7 @@ class ItemDropdownView(nextcord.ui.View):
         new_view = ItemDropdownView(self.session_id) if active else None
 
         await self._fast_edit(interaction, new_text, new_view)
-        asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
+        _schedule_refresh(self.session_id, delete_item=True)
 
     async def on_undo(self, interaction: nextcord.Interaction):
         """
@@ -585,7 +585,7 @@ class ItemDropdownView(nextcord.ui.View):
         new_text, active = _item_message_text_and_active(session)
         new_view = ItemDropdownView(self.session_id) if active else None
         await self._fast_edit(interaction, new_text, new_view)
-        asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
+        _schedule_refresh(self.session_id, delete_item=True)
 
 class ControlPanelView(nextcord.ui.View):
     """
@@ -732,7 +732,7 @@ class ControlPanelView(nextcord.ui.View):
             await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
-        asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
+        _schedule_refresh(self.session_id, delete_item=True)
 
     async def on_start(self, interaction: nextcord.Interaction):
         """
@@ -754,7 +754,7 @@ class ControlPanelView(nextcord.ui.View):
             await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
-        asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
+        _schedule_refresh(self.session_id, delete_item=True)
 
 
 class FinalizeView(nextcord.ui.View):
@@ -912,7 +912,7 @@ class FinalizeView(nextcord.ui.View):
         session["item_dropdown_message_id"] = None
 
         # refresh all messages, force creation of item dropdown
-        asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
+        _schedule_refresh(self.session_id, delete_item=True)
 
 # ---------- Message lifecycle, refresh, and timeout ----------
 async def _reset_session_timeout(session_id: int):
@@ -1084,6 +1084,31 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             session["item_dropdown_message_id"] = new_msg.id
         except Exception:
             session["item_dropdown_message_id"] = None
+
+
+def _schedule_refresh(session_id: int, delete_item: bool = True) -> asyncio.Task | None:
+    """
+    Schedule a stored refresh task for a session. This helper cancels any
+    previously scheduled refresh task on the session and stores the new task
+    in session['refresh_task'] so it isn't garbage-collected prematurely.
+    Returns the scheduled Task or None if scheduling failed.
+    """
+    session = loot_sessions.get(session_id)
+    if not session:
+        return None
+    prev = session.get("refresh_task")
+    if prev and not prev.done():
+        try:
+            prev.cancel()
+        except Exception:
+            pass
+    try:
+        t = asyncio.create_task(_refresh_all_messages(session_id, delete_item=delete_item))
+        session["refresh_task"] = t
+        return t
+    except Exception:
+        session["refresh_task"] = None
+        return None
 
 async def _schedule_session_timeout(session_id: int):
     """
