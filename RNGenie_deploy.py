@@ -863,7 +863,7 @@ class FinishControlView(nextcord.ui.View):
             if 0 <= idx < len(session["items"]):
                 session["items"][idx]["assigned_to"] = None
 
-        session["current_turn"] = last["turn"]
+                session["current_turn"] = last["turn"]
         session["round"] = last["round"]
         session["direction"] = last["direction"]
         session["just_reversed"] = last.get("just_reversed", False)
@@ -879,6 +879,10 @@ class FinishControlView(nextcord.ui.View):
                 pass
         session["finish_task"] = None
         session["awaiting_finish"] = False
+
+        # ensure stored ids are cleared so _refresh_all_messages will recreate the messages
+        session["loot_list_message_id"] = None
+        session["item_dropdown_message_id"] = None
 
         await _reset_session_timeout(self.session_id)
         try:
@@ -907,12 +911,18 @@ async def _finalize_session(session_id: int, timed_out: bool = False):
             await lm.delete()
     except Exception:
         pass
+    # clear stored id for cleanliness
+    session["loot_list_message_id"] = None
+
     try:
         im = await _get_msg(ch, session.get("item_dropdown_message_id"))
         if im:
             await im.delete()
     except Exception:
         pass
+    # clear stored id for cleanliness
+    session["item_dropdown_message_id"] = None
+
     final = build_final_summary_message(session, timed_out=timed_out)
     try:
         ctrl = await _get_msg(ch, session_id)
@@ -1030,6 +1040,9 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
                         await loot_msg.delete()
                     except Exception:
                         pass
+                # NB: clear stored id so future refresh knows it must recreate the message
+                session["loot_list_message_id"] = None
+
                 try:
                     existing = session.get("item_dropdown_message_id")
                     if existing:
@@ -1038,8 +1051,12 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
                             await maybe.delete()
                 except Exception:
                     pass
+                # NB: clear picker id so future refresh will recreate it
+                session["item_dropdown_message_id"] = None
+
                 # Keep the session alive (do not pop) — a finish_task will finalize it or the invoker will press Finish.
                 return
+
 
             # Not yet in awaiting_finish: enter the post-complete window.
             session["awaiting_finish"] = True
@@ -1082,6 +1099,17 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
         # Build current contents and only edit messages if changed to reduce API calls.
         loot_content = build_loot_list_message(session)
         control_content = build_control_panel_message(session)
+
+        # If the loot message was deleted previously, create a new one now
+        if not loot_msg:
+            try:
+                new_loot = await ch.send(loot_content)
+                session["loot_list_message_id"] = new_loot.id
+                loot_msg = new_loot
+                session["last_loot_content"] = loot_content
+            except Exception:
+                # sending failed; continue and try control/item updates
+                pass
 
         if loot_content != session.get("last_loot_content") and loot_msg:
             try:
@@ -1156,12 +1184,16 @@ async def _schedule_session_timeout(session_id: int):
             await lm.delete()
     except Exception:
         pass
+    session["loot_list_message_id"] = None
+
     try:
         im = await _get_msg(ch, session.get("item_dropdown_message_id"))
         if im:
             await im.delete()
     except Exception:
         pass
+    session["item_dropdown_message_id"] = None
+
     final = build_final_summary_message(session, timed_out=True)
     try:
         ctrl = await _get_msg(ch, session_id)
