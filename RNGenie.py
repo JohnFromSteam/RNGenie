@@ -4,6 +4,7 @@ import os
 import random
 import re
 import asyncio
+import time
 from dotenv import load_dotenv
 import nextcord
 from nextcord.ext import commands
@@ -192,6 +193,14 @@ def build_control_panel_message(session: dict) -> str:
         indicator = f"\n🔔 **Round {session['round'] + 1}** ({direction})\n\n"
     else:
         indicator = f"\n🎁 **Loot distribution is ready!**\n\n✍️ **Loot Manager can remove participants or click below to begin.**"
+    # Append expiry timer (Discord unix timestamp) if available
+    expires = session.get("expires_at")
+    if expires:
+        try:
+            ts = int(expires)
+            indicator += f"\n⏳ Expires: <t:{ts}:R>\n"
+        except Exception:
+            pass
     return f"{header}{roll_block}\n{assigned_block}{indicator}"
 
 def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
@@ -430,7 +439,7 @@ class ItemDropdownView(nextcord.ui.View):
         await self._ack(interaction)
         await _reset_session_timeout(self.session_id)
         # refresh messages without forcing item deletion (preserve dropdown when possible)
-        asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=False))
+        _schedule_refresh(self.session_id, delete_item=False)
 
     async def on_assign(self, interaction: nextcord.Interaction):
         """
@@ -486,7 +495,7 @@ class ItemDropdownView(nextcord.ui.View):
 
         edited = await self._fast_edit(interaction, new_text, new_view)
         # after assignment, force delete+recreate of the item message to ensure a fresh state
-        asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
+        _schedule_refresh(self.session_id, delete_item=True)
 
     async def on_skip(self, interaction: nextcord.Interaction):
         """
@@ -531,7 +540,7 @@ class ItemDropdownView(nextcord.ui.View):
         new_view = ItemDropdownView(self.session_id) if active else None
 
         await self._fast_edit(interaction, new_text, new_view)
-        asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
+        _schedule_refresh(self.session_id, delete_item=True)
 
     async def on_undo(self, interaction: nextcord.Interaction):
         """
@@ -576,7 +585,7 @@ class ItemDropdownView(nextcord.ui.View):
         new_text, active = _item_message_text_and_active(session)
         new_view = ItemDropdownView(self.session_id) if active else None
         await self._fast_edit(interaction, new_text, new_view)
-        asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
+        _schedule_refresh(self.session_id, delete_item=True)
 
 class ControlPanelView(nextcord.ui.View):
     """
@@ -723,7 +732,7 @@ class ControlPanelView(nextcord.ui.View):
             await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
-        asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
+        _schedule_refresh(self.session_id, delete_item=True)
 
     async def on_start(self, interaction: nextcord.Interaction):
         """
@@ -745,7 +754,165 @@ class ControlPanelView(nextcord.ui.View):
             await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
-        asyncio.create_task(_refresh_all_messages(self.session_id, delete_item=True))
+        _schedule_refresh(self.session_id, delete_item=True)
+
+
+class FinalizeView(nextcord.ui.View):
+    """
+    View shown when all items have been assigned. Only the invoker can interact.
+    Provides two buttons:
+      - 📝 Finish Loot Distribution: merge messages and finish session
+      - ↩️ Undo: undo the last assigned items and continue the rounds
+    """
+    def __init__(self, session_id: int):
+        super().__init__(timeout=None)
+        self.session_id = session_id
+        # Buttons
+        self.add_item(nextcord.ui.Button(label="📝 Finish Loot Distribution", style=nextcord.ButtonStyle.success, custom_id="finalize_finish"))
+        self.add_item(nextcord.ui.Button(label="↩️ Undo", style=nextcord.ButtonStyle.secondary, custom_id="finalize_undo"))
+        for child in self.children:
+            if getattr(child, "custom_id", "") == "finalize_finish":
+                child.callback = self.on_finish
+            if getattr(child, "custom_id", "") == "finalize_undo":
+                child.callback = self.on_undo
+
+    async def interaction_check(self, interaction: nextcord.Interaction) -> bool:
+        session = loot_sessions.get(self.session_id)
+        if not session:
+            try:
+                await interaction.response.send_message("Session expired.", ephemeral=True)
+            except Exception:
+                pass
+            return False
+        if interaction.user.id == session["invoker_id"]:
+            return True
+        try:
+            await interaction.response.send_message(f"🛡️ Only {session['invoker'].mention} can use these controls.", ephemeral=True)
+        except Exception:
+            pass
+        return False
+
+    async def on_finish(self, interaction: nextcord.Interaction):
+        """Merge messages and finish the loot distribution (same as prior finalization)."""
+        session = loot_sessions.get(self.session_id)
+        if not session:
+            try:
+                await interaction.response.send_message("Session expired.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        # Acknowledge quickly
+        try:
+            await interaction.response.defer()
+        except Exception:
+            try:
+                await interaction.response.send_message("Finishing...", ephemeral=True)
+            except Exception:
+                pass
+
+        ch = bot.get_channel(session["channel_id"])
+        final = build_final_summary_message(session, timed_out=False)
+        try:
+            ctrl = await _get_msg(ch, self.session_id)
+            if ctrl:
+                await ctrl.edit(content=final, view=None)
+            else:
+                fallback = await _get_msg(ch, self.session_id)
+                if fallback:
+                    await fallback.edit(content=final, view=None)
+        except Exception:
+            pass
+
+        # delete loot list message
+        try:
+            lm = await _get_msg(ch, session.get("loot_list_message_id"))
+            if lm:
+                await lm.delete()
+        except Exception:
+            pass
+
+        # delete any item message (this finalize message included)
+        try:
+            existing = session.get("item_dropdown_message_id")
+            if existing:
+                maybe = await _get_msg(ch, existing)
+                if maybe:
+                    try:
+                        await maybe.delete()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # cancel timeout and remove session
+        t = session.get("timeout_task")
+        if t:
+            try:
+                t.cancel()
+            except Exception:
+                pass
+        loot_sessions.pop(self.session_id, None)
+        session_locks.pop(self.session_id, None)
+
+    async def on_undo(self, interaction: nextcord.Interaction):
+        """Undo the last assign/skip action (invoker only) and resume the rounds."""
+        session = loot_sessions.get(self.session_id)
+        if not session:
+            try:
+                await interaction.response.send_message("Session expired.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        # only invoker allowed (double-check)
+        if interaction.user.id != session["invoker_id"]:
+            try:
+                await interaction.response.send_message("🛡️ Only the Loot Manager can use Undo.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        last = session.get("last_action")
+        if not last:
+            try:
+                await interaction.response.send_message("❌ There is nothing to undo.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        # Undo assigned indices
+        for idx in last.get("assigned_indices", []):
+            if 0 <= idx < len(session["items"]):
+                session["items"][idx]["assigned_to"] = None
+
+        session["current_turn"] = last["turn"]
+        session["round"] = last["round"]
+        session["direction"] = last["direction"]
+        session["just_reversed"] = last.get("just_reversed", False)
+        session["last_action"] = None
+        session["selected_items"] = None
+
+        # reset timeout
+        await _reset_session_timeout(self.session_id)
+
+        # delete the finalize message and recreate the normal item dropdown flow
+        ch = bot.get_channel(session["channel_id"])
+        try:
+            existing = session.get("item_dropdown_message_id")
+            if existing:
+                maybe = await _get_msg(ch, existing)
+                if maybe:
+                    try:
+                        await maybe.delete()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        session["item_dropdown_message_id"] = None
+
+        # refresh all messages, force creation of item dropdown
+        _schedule_refresh(self.session_id, delete_item=True)
 
 # ---------- Message lifecycle, refresh, and timeout ----------
 async def _reset_session_timeout(session_id: int):
@@ -762,6 +929,10 @@ async def _reset_session_timeout(session_id: int):
         except Exception:
             pass
     session["timeout_task"] = asyncio.create_task(_schedule_session_timeout(session_id))
+    try:
+        session["expires_at"] = int(time.time() + SESSION_TIMEOUT_SECONDS)
+    except Exception:
+        session["expires_at"] = None
 
 async def _refresh_all_messages(session_id: int, delete_item: bool = True):
     """
@@ -806,10 +977,13 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             existing_item_msg = None
             existing_item_id = None
 
-        # If distribution complete, show final summary and cleanup session.
+        # If distribution complete, show final summary and present a finalize view
+        # to the invoker instead of immediately tearing down. The finalize view
+        # allows the invoker to Finish (merge messages) or Undo the last action.
         if not _are_items_left(session) and session["current_turn"] != TURN_NOT_STARTED:
             final = build_final_summary_message(session, timed_out=False)
             try:
+                # Update control panel with final summary
                 if control_msg:
                     await control_msg.edit(content=final, view=None)
                 else:
@@ -818,27 +992,43 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
                         await fallback.edit(content=final, view=None)
             except Exception:
                 pass
-            if loot_msg:
+
+            # Keep the loot list (left) message alive so the loot manager can
+            # inspect unassigned items and potentially Undo. It will be removed
+            # when the invoker presses Finish.
+
+            # If a finalize/item message already exists, don't recreate it.
+            existing = session.get("item_dropdown_message_id")
+            maybe = None
+            if existing:
                 try:
-                    await loot_msg.delete()
-                except Exception:
-                    pass
-            try:
-                existing = session.get("item_dropdown_message_id")
-                if existing:
                     maybe = await _get_msg(ch, existing)
-                    if maybe:
-                        await maybe.delete()
-            except Exception:
-                pass
-            t = session.get("timeout_task")
-            if t:
-                try:
-                    t.cancel()
                 except Exception:
-                    pass
-            loot_sessions.pop(session_id, None)
-            session_locks.pop(session_id, None)
+                    maybe = None
+
+            # Create a finalize message addressed to the invoker with the FinalizeView
+            try:
+                inv = session.get("invoker")
+                invoke_mention = inv.mention if inv else f"<@{session.get('invoker_id')}>"
+            except Exception:
+                invoke_mention = f"<@{session.get('invoker_id')}>"
+            finalize_text = f"✍️ {invoke_mention}\n\nClick an action below to finish or undo the last assignment."
+            view = FinalizeView(session_id)
+            if maybe:
+                try:
+                    await maybe.edit(content=finalize_text, view=view)
+                    session["item_dropdown_message_id"] = maybe.id
+                except Exception:
+                    session["item_dropdown_message_id"] = None
+            else:
+                try:
+                    msg = await ch.send(finalize_text, view=view)
+                    session["item_dropdown_message_id"] = msg.id
+                except Exception:
+                    session["item_dropdown_message_id"] = None
+
+            # Keep session alive until invoker finishes via FinalizeView
+            await _reset_session_timeout(session_id)
             return
 
         # Build current contents and only edit messages if changed to reduce API calls.
@@ -894,6 +1084,31 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             session["item_dropdown_message_id"] = new_msg.id
         except Exception:
             session["item_dropdown_message_id"] = None
+
+
+def _schedule_refresh(session_id: int, delete_item: bool = True) -> asyncio.Task | None:
+    """
+    Schedule a stored refresh task for a session. This helper cancels any
+    previously scheduled refresh task on the session and stores the new task
+    in session['refresh_task'] so it isn't garbage-collected prematurely.
+    Returns the scheduled Task or None if scheduling failed.
+    """
+    session = loot_sessions.get(session_id)
+    if not session:
+        return None
+    prev = session.get("refresh_task")
+    if prev and not prev.done():
+        try:
+            prev.cancel()
+        except Exception:
+            pass
+    try:
+        t = asyncio.create_task(_refresh_all_messages(session_id, delete_item=delete_item))
+        session["refresh_task"] = t
+        return t
+    except Exception:
+        session["refresh_task"] = None
+        return None
 
 async def _schedule_session_timeout(session_id: int):
     """
