@@ -38,7 +38,8 @@ SESSION_TIMEOUT_SECONDS = 600  # seconds of inactivity before session times out
 TURN_NOT_STARTED = -1  # sentinel for "no turn has begun yet"
 
 # How long to wait to coalesce multiple refresh requests (seconds)
-REFRESH_DEBOUNCE_SECONDS = 0.6
+# Use 1.0s as the debounce/grace window per UX request
+REFRESH_DEBOUNCE_SECONDS = 1.0
 
 # emoji mapping for numbered players (1..10) + fallback for higher counts
 NUMBER_EMOJIS = {
@@ -528,6 +529,17 @@ class ItemDropdownView(nextcord.ui.View):
             current |= newly
             session["selected_items"] = list(current)
 
+        # Try to collapse the dropdown on selection by editing the message to remove the view.
+        try:
+            if interaction.message:
+                try:
+                    await interaction.message.edit(view=None)
+                except Exception:
+                    # best-effort: ignore edit errors
+                    pass
+        except Exception:
+            pass
+
         await self._ack(interaction)
         await _reset_session_timeout(self.session_id)
         # refresh messages without forcing item deletion (preserve dropdown when possible)
@@ -1011,10 +1023,25 @@ class FinalizeView(nextcord.ui.View):
                 pass
             return
 
-        # Undo assigned indices
-        for idx in last.get("assigned_indices", []):
-            if 0 <= idx < len(session["items"]):
-                session["items"][idx]["assigned_to"] = None
+        # Prefer stable display numbers for undoing (more robust if ordering changed)
+        assigned_numbers = last.get("assigned_numbers") or []
+        if not assigned_numbers:
+            for idx in last.get("assigned_indices", []):
+                if 0 <= idx < len(session["items"]):
+                    num = session["items"][idx].get("display_number")
+                    if num:
+                        assigned_numbers.append(num)
+
+        if assigned_numbers:
+            for num in assigned_numbers:
+                for it in session["items"]:
+                    if it.get("display_number") == num:
+                        it["assigned_to"] = None
+                        break
+            # Rebuild ordering: remaining then assigned
+            remaining = [it for it in session["items"] if it["assigned_to"] is None]
+            assigned = [it for it in session["items"] if it["assigned_to"]]
+            session["items"] = remaining + assigned
 
         session["current_turn"] = last["turn"]
         session["round"] = last["round"]
@@ -1166,14 +1193,8 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
 
             # present the finalize message to the invoker (third message) with FinalizeView
             expires = session.get("expires_at")
-            timer_line = ""
-            if expires:
-                try:
-                    ts = int(expires)
-                    timer_line = f"\n\n⏳ Expires: <t:{ts}:R>"
-                except Exception:
-                    timer_line = ""
-            finalize_text = f"✍️ {session['invoker'].mention}\n\nClick an action below to finish or undo the last assignment." + timer_line
+            # Don't include the expiry timer in the finalize message; keep it simple.
+            finalize_text = f"✍️ {session['invoker'].mention}\n\nClick an action below to finish or undo the last assignment."
             finalize_view = FinalizeView(session_id)
 
             # delete any existing item message (we'll replace it with finalize)
@@ -1250,14 +1271,14 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
                 session["item_dropdown_message_id"] = None
                 existing_item_msg = None
 
-        # Ensure we wait at least 2 seconds after the most recent deletion to
-        # avoid racey UI where the new picker appears before other edits finish.
+        # Ensure we wait at least REFRESH_DEBOUNCE_SECONDS after the most recent
+        # deletion to avoid racey UI where the new picker appears before other edits finish.
         last_del = session.get("last_item_deleted_at")
         if last_del:
             try:
                 elapsed = time.time() - float(last_del)
-                if elapsed < 2:
-                    await asyncio.sleep(2 - elapsed)
+                if elapsed < REFRESH_DEBOUNCE_SECONDS:
+                    await asyncio.sleep(REFRESH_DEBOUNCE_SECONDS - elapsed)
             except Exception:
                 pass
 
