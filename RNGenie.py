@@ -1099,6 +1099,10 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
                 await existing_item_msg.delete()
             except Exception:
                 pass
+            try:
+                session["last_item_deleted_at"] = time.time()
+            except Exception:
+                pass
             session["item_dropdown_message_id"] = None
             existing_item_msg = None
             existing_item_id = None
@@ -1122,23 +1126,27 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
 
             # show the 'Last Assigned Loot Items' in the left loot list so the
             # invoker can see what was most recently assigned before finishing.
+            # Do not duplicate assigned items (the last-assigned block is shown
+            # once) and do not append the expiry timer here — the finalize
+            # message contains the timer for the invoker.
             try:
                 last_block = build_last_assigned_block(session)
-                body = build_loot_list_body(session)
+                # Build a remaining-only body (exclude already-assigned items)
+                remaining_items = [it for it in session["items"] if it["assigned_to"] is None]
+                remaining_body = ""
+                if remaining_items:
+                    remaining_body = "```ansi\n"
+                    remaining_body += f"{RED}{BOLD}❌ Remaining Loot Items ❌{RESET}\n"
+                    remaining_body += "==================================\n"
+                    for it in remaining_items:
+                        remaining_body += f"{RED}{it['display_number']}.{RESET} {it['name']}\n"
+                    remaining_body += "```"
+
                 combined = "**(1/2)**\n"
                 if last_block:
-                    combined += last_block + "\n"
-                if body:
-                    combined += body
-
-                # append expiry timer if available
-                expires = session.get("expires_at")
-                if expires:
-                    try:
-                        ts = int(expires)
-                        combined += f"\n⏳ Expires: <t:{ts}:R>"
-                    except Exception:
-                        pass
+                    combined += last_block
+                if remaining_body:
+                    combined += "\n" + remaining_body
 
                 if loot_msg and combined != session.get("last_loot_content"):
                     await loot_msg.edit(content=combined)
@@ -1166,6 +1174,10 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             if existing_item_msg:
                 try:
                     await existing_item_msg.delete()
+                except Exception:
+                    pass
+                try:
+                    session["last_item_deleted_at"] = time.time()
                 except Exception:
                     pass
 
@@ -1231,6 +1243,17 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             except Exception:
                 session["item_dropdown_message_id"] = None
                 existing_item_msg = None
+
+        # Ensure we wait at least 4 seconds after the most recent deletion to
+        # avoid racey UI where the new picker appears before other edits finish.
+        last_del = session.get("last_item_deleted_at")
+        if last_del:
+            try:
+                elapsed = time.time() - float(last_del)
+                if elapsed < 4:
+                    await asyncio.sleep(4 - elapsed)
+            except Exception:
+                pass
 
         try:
             new_msg = await ch.send(item_text, view=view)
