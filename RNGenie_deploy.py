@@ -985,8 +985,8 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             # so the control panel shows the 10-minute expiry timer for the invoker.
             await _reset_session_timeout(session_id)
 
-            # build final control content and edit control message (only if changed)
-            final_ctrl = build_control_panel_message(session)
+            # build final control content and edit control message (show final summary)
+            final_ctrl = build_final_summary_message(session, timed_out=False)
             try:
                 if control_msg and final_ctrl != session.get("last_control_content"):
                     await control_msg.edit(content=final_ctrl)
