@@ -561,6 +561,26 @@ class ItemDropdownView(nextcord.ui.View):
             _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
         except Exception:
             pass
+        # Try to quickly edit the existing picker message in-place so the
+        # dropdown updates immediately for the user. Fall back to a refresh
+        # if editing isn't possible.
+        try:
+            session = loot_sessions.get(self.session_id)
+            if session:
+                ch = bot.get_channel(session["channel_id"])
+                existing_id = session.get("item_dropdown_message_id")
+                if ch and existing_id:
+                    msg = await _get_msg(ch, existing_id)
+                    if msg:
+                        # Build current item text and view and edit in-place
+                        item_text, is_active = _item_message_text_and_active(session)
+                        view = ItemDropdownView(self.session_id) if is_active else None
+                        await msg.edit(content=item_text, view=view)
+                        session["item_dropdown_message_id"] = msg.id
+                        return
+        except Exception:
+            pass
+
         # refresh messages without forcing item deletion (preserve dropdown when possible)
         _schedule_refresh(self.session_id, delete_item=False)
 
@@ -786,6 +806,22 @@ class ItemDropdownView(nextcord.ui.View):
         await self._ack(interaction)
         try:
             _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
+        except Exception:
+            pass
+        # Try to edit the existing item picker in-place to avoid creating a
+        # duplicate third message. If that fails, schedule an immediate refresh
+        # to recreate the picker.
+        try:
+            ch = bot.get_channel(session["channel_id"])
+            existing_id = session.get("item_dropdown_message_id")
+            if ch and existing_id:
+                msg = await _get_msg(ch, existing_id)
+                if msg:
+                    item_text, is_active = _item_message_text_and_active(session)
+                    view = ItemDropdownView(self.session_id) if is_active else None
+                    await msg.edit(content=item_text, view=view)
+                    session["item_dropdown_message_id"] = msg.id
+                    return
         except Exception:
             pass
         _schedule_refresh_now(self.session_id, delete_item=False)
