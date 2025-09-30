@@ -609,6 +609,10 @@ class ItemDropdownView(nextcord.ui.View):
             msg = getattr(interaction, "message", None)
             if msg:
                 _schedule_bg_task(self.session_id, msg.delete())
+                try:
+                    session["last_item_deleted_at"] = time.time()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -628,10 +632,10 @@ class ItemDropdownView(nextcord.ui.View):
             _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
         except Exception:
             pass
-
         # Recreate the picker after other messages have been synced. We deleted
-        # the picker above, so schedule a refresh that will create it (delete_item=False).
-        _schedule_refresh(self.session_id, delete_item=False)
+        # the picker above, so schedule an immediate refresh that will create
+        # it (delete_item=False) to reduce perceived latency.
+        _schedule_refresh_now(self.session_id, delete_item=False)
 
     async def on_skip(self, interaction: nextcord.Interaction):
         """
@@ -677,6 +681,10 @@ class ItemDropdownView(nextcord.ui.View):
             msg = getattr(interaction, "message", None)
             if msg:
                 _schedule_bg_task(self.session_id, msg.delete())
+                try:
+                    session["last_item_deleted_at"] = time.time()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -685,8 +693,7 @@ class ItemDropdownView(nextcord.ui.View):
             _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
         except Exception:
             pass
-
-        _schedule_refresh(self.session_id, delete_item=False)
+        _schedule_refresh_now(self.session_id, delete_item=False)
 
     async def on_undo(self, interaction: nextcord.Interaction):
         """
@@ -750,7 +757,7 @@ class ItemDropdownView(nextcord.ui.View):
             _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
         except Exception:
             pass
-        _schedule_refresh(self.session_id, delete_item=False)
+        _schedule_refresh_now(self.session_id, delete_item=False)
 
 class ControlPanelView(nextcord.ui.View):
     """
@@ -911,7 +918,7 @@ class ControlPanelView(nextcord.ui.View):
             await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
-        _schedule_refresh(self.session_id, delete_item=True)
+        _schedule_refresh_now(self.session_id, delete_item=True)
 
     async def on_start(self, interaction: nextcord.Interaction):
         """
@@ -1017,6 +1024,10 @@ class FinalizeView(nextcord.ui.View):
                         await lm.delete()
                 except Exception:
                     pass
+            try:
+                session["last_item_deleted_at"] = time.time()
+            except Exception:
+                pass
             _schedule_bg_task(self.session_id, _del_loot())
         except Exception:
             pass
@@ -1035,6 +1046,10 @@ class FinalizeView(nextcord.ui.View):
                             pass
                 except Exception:
                     pass
+            try:
+                session["last_item_deleted_at"] = time.time()
+            except Exception:
+                pass
             _schedule_bg_task(self.session_id, _del_item())
         except Exception:
             pass
@@ -1125,6 +1140,10 @@ class FinalizeView(nextcord.ui.View):
                             pass
                 except Exception:
                     pass
+            try:
+                session["last_item_deleted_at"] = time.time()
+            except Exception:
+                pass
             _schedule_bg_task(self.session_id, _del_item2())
         except Exception:
             pass
@@ -1378,6 +1397,42 @@ def _schedule_refresh(session_id: int, delete_item: bool = True) -> asyncio.Task
         session["_refresh_debounce_task"] = d
         return d
     except Exception:
+        return None
+
+
+def _schedule_refresh_now(session_id: int, delete_item: bool = True) -> asyncio.Task | None:
+    """
+    Immediately schedule a refresh (bypassing the short debounce). This is
+    used in hot paths where we want the picker recreated as soon as possible
+    after an assign/skip/start/undo action. The running refresh Task is
+    stored on session['refresh_task'] to avoid GC cancellation races.
+    """
+    session = loot_sessions.get(session_id)
+    if not session:
+        return None
+
+    # Cancel any queued debounce waiter
+    debounce = session.get("_refresh_debounce_task")
+    if debounce and not debounce.done():
+        try:
+            debounce.cancel()
+        except Exception:
+            pass
+
+    # Cancel any previous running refresh (we'll replace it)
+    prev = session.get("refresh_task")
+    if prev and not prev.done():
+        try:
+            prev.cancel()
+        except Exception:
+            pass
+
+    try:
+        t = asyncio.create_task(_refresh_all_messages(session_id, delete_item=delete_item))
+        session["refresh_task"] = t
+        return t
+    except Exception:
+        session["refresh_task"] = None
         return None
 
 
