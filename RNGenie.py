@@ -1014,28 +1014,15 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             # so the control panel shows the 10-minute expiry timer for the invoker.
             await _reset_session_timeout(session_id)
 
-            # build final control content and edit control message (show final summary)
-            final_ctrl = build_final_summary_message(session, timed_out=False)
+
+            # build final control content and edit control message (only if changed)
+            final_ctrl = build_control_panel_message(session)
             try:
                 if control_msg and final_ctrl != session.get("last_control_content"):
                     await control_msg.edit(content=final_ctrl)
                     session["last_control_content"] = final_ctrl
             except Exception:
                 pass
-
-            # show the 'Last Assigned Loot Items' in the left loot list so the
-            # invoker can see what was most recently assigned before finishing.
-            try:
-                last_assigned = build_last_assigned_message(session)
-                if loot_msg and last_assigned != session.get("last_loot_content"):
-                    await loot_msg.edit(content=last_assigned)
-                    session["last_loot_content"] = last_assigned
-            except Exception:
-                pass
-
-            # mark that finalize UI is shown so timeout handling knows how to
-            # collapse the last-assigned view into the merged final state.
-            session["finalize_shown"] = True
 
             # present the finalize message to the invoker (third message) with FinalizeView
             finalize_text = f"✍️ {session['invoker'].mention}\n\nClick an action below to finish or undo the last assignment."
