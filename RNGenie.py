@@ -981,54 +981,43 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
         # to the invoker instead of immediately tearing down. The finalize view
         # allows the invoker to Finish (merge messages) or Undo the last action.
         if not _are_items_left(session) and session["current_turn"] != TURN_NOT_STARTED:
-            final = build_final_summary_message(session, timed_out=False)
+            # Ensure we renew the session timeout when presenting the finalize view
+            # so the control panel shows the 10-minute expiry timer for the invoker.
+            await _reset_session_timeout(session_id)
+
+            # build final control content and edit control message (only if changed)
+            final_ctrl = build_control_panel_message(session)
             try:
-                # Update control panel with final summary
-                if control_msg:
-                    await control_msg.edit(content=final, view=None)
-                else:
-                    fallback = await _get_msg(ch, session_id)
-                    if fallback:
-                        await fallback.edit(content=final, view=None)
+                if control_msg and final_ctrl != session.get("last_control_content"):
+                    await control_msg.edit(content=final_ctrl)
+                    session["last_control_content"] = final_ctrl
             except Exception:
                 pass
 
-            # Keep the loot list (left) message alive so the loot manager can
-            # inspect unassigned items and potentially Undo. It will be removed
-            # when the invoker presses Finish.
+            # present the finalize message to the invoker (third message) with FinalizeView
+            finalize_text = f"✍️ {session['invoker'].mention}\n\nClick an action below to finish or undo the last assignment."
+            finalize_view = FinalizeView(session_id)
 
-            # If a finalize/item message already exists, don't recreate it.
-            existing = session.get("item_dropdown_message_id")
-            maybe = None
-            if existing:
+            # delete any existing item message (we'll replace it with finalize)
+            if existing_item_msg:
                 try:
-                    maybe = await _get_msg(ch, existing)
+                    await existing_item_msg.delete()
                 except Exception:
-                    maybe = None
+                    pass
 
-            # Create a finalize message addressed to the invoker with the FinalizeView
             try:
-                inv = session.get("invoker")
-                invoke_mention = inv.mention if inv else f"<@{session.get('invoker_id')}>"
+                sent = await ch.send(finalize_text, view=finalize_view)
+                session["item_dropdown_message_id"] = sent.id
             except Exception:
-                invoke_mention = f"<@{session.get('invoker_id')}>"
-            finalize_text = f"✍️ {invoke_mention}\n\nClick an action below to finish or undo the last assignment."
-            view = FinalizeView(session_id)
-            if maybe:
+                # best-effort: attempt to edit an existing placeholder if present
                 try:
-                    await maybe.edit(content=finalize_text, view=view)
-                    session["item_dropdown_message_id"] = maybe.id
+                    if existing_item_msg:
+                        await existing_item_msg.edit(content=finalize_text, view=finalize_view)
+                        session["item_dropdown_message_id"] = existing_item_msg.id
                 except Exception:
-                    session["item_dropdown_message_id"] = None
-            else:
-                try:
-                    msg = await ch.send(finalize_text, view=view)
-                    session["item_dropdown_message_id"] = msg.id
-                except Exception:
-                    session["item_dropdown_message_id"] = None
+                    pass
 
-            # Keep session alive until invoker finishes via FinalizeView
-            await _reset_session_timeout(session_id)
+            # Don't proceed further in this refresh (finalize view shown)
             return
 
         # Build current contents and only edit messages if changed to reduce API calls.
