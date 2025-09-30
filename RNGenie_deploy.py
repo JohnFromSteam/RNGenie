@@ -37,6 +37,9 @@ session_locks: dict[int, asyncio.Lock] = {}
 SESSION_TIMEOUT_SECONDS = 600  # seconds of inactivity before session times out
 TURN_NOT_STARTED = -1  # sentinel for "no turn has begun yet"
 
+# How long to wait to coalesce multiple refresh requests (seconds)
+REFRESH_DEBOUNCE_SECONDS = 0.6
+
 # emoji mapping for numbered players (1..10) + fallback for higher counts
 NUMBER_EMOJIS = {
     1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣",
@@ -80,6 +83,11 @@ def _advance_turn_snake(session: dict) -> None:
         # if there's only one roller, ensure index stays valid
         if num == 1:
             session["current_turn"] = 0
+        # record deletion time so the refresh path will respect the grace period
+        try:
+            session["last_item_deleted_at"] = time.time()
+        except Exception:
+            pass
 
 def _build_roll_lines(rolls: list) -> str:
     """
@@ -164,11 +172,9 @@ def build_loot_list_body(session: dict) -> str:
         body += "\n"
 
     if assigned:
-        # Append previously assigned items to the bottom of the list.
-        # The explicit "Assigned Items (Recent)" header is redundant because
-        # the Finalize/Last Assigned block already highlights the most recent assignment.
-        for it in assigned:
-            body += f"{GREEN}{it['display_number']}.{RESET} {it['name']}\n"
+        # Do not show assigned items in the remaining list; this list should
+        # only show items that remain unassigned.
+        pass
 
     body += "```"
     return body
@@ -1244,14 +1250,14 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
                 session["item_dropdown_message_id"] = None
                 existing_item_msg = None
 
-        # Ensure we wait at least 4 seconds after the most recent deletion to
+        # Ensure we wait at least 2 seconds after the most recent deletion to
         # avoid racey UI where the new picker appears before other edits finish.
         last_del = session.get("last_item_deleted_at")
         if last_del:
             try:
                 elapsed = time.time() - float(last_del)
-                if elapsed < 4:
-                    await asyncio.sleep(4 - elapsed)
+                if elapsed < 2:
+                    await asyncio.sleep(2 - elapsed)
             except Exception:
                 pass
 
@@ -1264,20 +1270,57 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
 
 def _schedule_refresh(session_id: int, delete_item: bool = True) -> asyncio.Task | None:
     """
-    Schedule a stored refresh task for a session. This helper cancels any
-    previously scheduled refresh task on the session and stores the new task
-    in session['refresh_task'] so it isn't garbage-collected prematurely.
-    Returns the scheduled Task or None if scheduling failed.
+    Debounced schedule for refreshes. Multiple calls within
+    REFRESH_DEBOUNCE_SECONDS will coalesce into a single refresh.
+    Stores the running refresh Task on session['refresh_task'] to avoid
+    GC cancellation races and returns that Task.
     """
     session = loot_sessions.get(session_id)
     if not session:
         return None
+
+    # Cancel any previously queued debounce waiter
+    debounce = session.get("_refresh_debounce_task")
+    if debounce and not debounce.done():
+        try:
+            debounce.cancel()
+        except Exception:
+            pass
+
+    # Schedule a short-delay debounced coroutine that will create the real
+    # refresh task after the debounce window. Store the debounce task so
+    # subsequent callers can cancel/reschedule it.
+    try:
+        d = asyncio.create_task(_debounced_refresh(session_id, delete_item))
+        session["_refresh_debounce_task"] = d
+        return d
+    except Exception:
+        return None
+
+
+async def _debounced_refresh(session_id: int, delete_item: bool):
+    """Wait REFRESH_DEBOUNCE_SECONDS then run the actual _refresh_all_messages
+    and record the running task on session['refresh_task'] so it isn't
+    garbage-collected prematurely.
+    """
+    try:
+        await asyncio.sleep(REFRESH_DEBOUNCE_SECONDS)
+    except asyncio.CancelledError:
+        return None
+
+    session = loot_sessions.get(session_id)
+    if not session:
+        return None
+
+    # If a previous running refresh task exists, cancel it; we will replace
+    # it with a fresh task for this run.
     prev = session.get("refresh_task")
     if prev and not prev.done():
         try:
             prev.cancel()
         except Exception:
             pass
+
     try:
         t = asyncio.create_task(_refresh_all_messages(session_id, delete_item=delete_item))
         session["refresh_task"] = t
