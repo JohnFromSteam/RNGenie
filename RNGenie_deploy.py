@@ -4,6 +4,7 @@ import os
 import random
 import re
 import asyncio
+import time
 from dotenv import load_dotenv
 import nextcord
 from nextcord.ext import commands
@@ -192,6 +193,14 @@ def build_control_panel_message(session: dict) -> str:
         indicator = f"\n🔔 **Round {session['round'] + 1}** ({direction})\n\n"
     else:
         indicator = f"\n🎁 **Loot distribution is ready!**\n\n✍️ **Loot Manager can remove participants or click below to begin.**"
+    # Append expiry timer (Discord unix timestamp) if available
+    expires = session.get("expires_at")
+    if expires:
+        try:
+            ts = int(expires)
+            indicator += f"\n⏳ Expires: <t:{ts}:R>\n"
+        except Exception:
+            pass
     return f"{header}{roll_block}\n{assigned_block}{indicator}"
 
 def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
@@ -920,6 +929,10 @@ async def _reset_session_timeout(session_id: int):
         except Exception:
             pass
     session["timeout_task"] = asyncio.create_task(_schedule_session_timeout(session_id))
+    try:
+        session["expires_at"] = int(time.time() + SESSION_TIMEOUT_SECONDS)
+    except Exception:
+        session["expires_at"] = None
 
 async def _refresh_all_messages(session_id: int, delete_item: bool = True):
     """
@@ -980,12 +993,9 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             except Exception:
                 pass
 
-            # delete the loot list (left) message
-            if loot_msg:
-                try:
-                    await loot_msg.delete()
-                except Exception:
-                    pass
+            # Keep the loot list (left) message alive so the loot manager can
+            # inspect unassigned items and potentially Undo. It will be removed
+            # when the invoker presses Finish.
 
             # If a finalize/item message already exists, don't recreate it.
             existing = session.get("item_dropdown_message_id")
