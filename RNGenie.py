@@ -1032,6 +1032,11 @@ class FinalizeView(nextcord.ui.View):
                 pass
 
         ch = bot.get_channel(session["channel_id"])
+        # Clear expiry to avoid showing timer in the merged final message
+        try:
+            session["expires_at"] = None
+        except Exception:
+            pass
         final = build_final_summary_message(session, timed_out=False)
         try:
             ctrl = await _get_msg(ch, self.session_id)
@@ -1306,6 +1311,13 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True, ignor
             # mark that finalize UI is shown so timeout handling knows how to
             # collapse the last-assigned view into the merged final state.
             session["finalize_shown"] = True
+
+            # Clear the expiry on finalize UI display to avoid showing a timer
+            # in the finalize message; the control panel already shows expiry.
+            try:
+                session["expires_at"] = None
+            except Exception:
+                pass
 
             # present the finalize message to the invoker (third message) with FinalizeView
             expires = session.get("expires_at")
@@ -1587,6 +1599,11 @@ async def _schedule_session_timeout(session_id: int):
     session_locks.pop(session_id, None)
     if not session:
         return
+    # Clear expiry as we're now finalizing due to timeout; don't show a timer
+    try:
+        session["expires_at"] = None
+    except Exception:
+        pass
     ch = bot.get_channel(session["channel_id"])
     if not ch:
         return
