@@ -150,6 +150,31 @@ def build_loot_list_message(session: dict) -> str:
         "```"
     )
 
+def build_last_assigned_message(session: dict) -> str:
+    """
+    Build a 'Last Assigned Loot Items' view showing the items that were
+    assigned in the most recent action (session['last_action']['assigned_indices']).
+    Falls back to the normal loot list if no snapshot is available.
+    """
+    header = f"**(1/2)**\n"
+    last = session.get("last_action") or {}
+    indices = last.get("assigned_indices") or []
+    if not indices:
+        # Nothing to show; fall back to the usual loot list (should be all assigned)
+        return build_loot_list_message(session)
+
+    body = (
+        "```ansi\n"
+        f"{MAGENTA}{BOLD}📝 Last Assigned Loot Items 📝{RESET}\n"
+        "==================================\n"
+    )
+    for idx in indices:
+        if 0 <= idx < len(session["items"]):
+            it = session["items"][idx]
+            body += f"{MAGENTA}{it['display_number']}.{RESET} {it['name']}\n"
+    body += "```"
+    return f"{header}{body}"
+
 def build_control_panel_message(session: dict) -> str:
     """
     Build the control panel message (2/2) containing roll order + assigned items
@@ -852,6 +877,8 @@ class FinalizeView(nextcord.ui.View):
                 t.cancel()
             except Exception:
                 pass
+        # clear finalize marker and remove session
+        session.pop("finalize_shown", None)
         loot_sessions.pop(self.session_id, None)
         session_locks.pop(self.session_id, None)
 
@@ -910,6 +937,8 @@ class FinalizeView(nextcord.ui.View):
         except Exception:
             pass
         session["item_dropdown_message_id"] = None
+        # clear finalize marker since we returned to active flow
+        session.pop("finalize_shown", None)
 
         # refresh all messages, force creation of item dropdown
         _schedule_refresh(self.session_id, delete_item=True)
@@ -985,6 +1014,7 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             # so the control panel shows the 10-minute expiry timer for the invoker.
             await _reset_session_timeout(session_id)
 
+
             # build final control content and edit control message (only if changed)
             final_ctrl = build_control_panel_message(session)
             try:
@@ -997,7 +1027,7 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             # present the finalize message to the invoker (third message) with FinalizeView
             finalize_text = f"✍️ {session['invoker'].mention}\n\nClick an action below to finish or undo the last assignment."
             finalize_view = FinalizeView(session_id)
-
+            
             # delete any existing item message (we'll replace it with finalize)
             if existing_item_msg:
                 try:
@@ -1118,8 +1148,24 @@ async def _schedule_session_timeout(session_id: int):
         return
     try:
         lm = await _get_msg(ch, session.get("loot_list_message_id"))
+        # If finalize view was shown, we had displayed the 'Last Assigned' list
+        # and we should now replace it with the merged final summary instead
+        # of leaving the last-assigned snapshot.
         if lm:
-            await lm.delete()
+            if session.get("finalize_shown"):
+                try:
+                    merged = build_final_summary_message(session, timed_out=True)
+                    await lm.edit(content=merged)
+                except Exception:
+                    try:
+                        await lm.delete()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    await lm.delete()
+                except Exception:
+                    pass
     except Exception:
         pass
     try:
@@ -1250,7 +1296,7 @@ class LootModal(nextcord.ui.Modal):
         session["last_loot_content"] = build_loot_list_message(session)
 
         # create item dropdown via refresh task (delete/create behavior handled there)
-        asyncio.create_task(_refresh_all_messages(session_id, delete_item=True))
+        _schedule_refresh(session_id, delete_item=True)
 
 @bot.slash_command(name="loot", description="Starts a turn-based loot roll for your voice channel.")
 async def loot(interaction: nextcord.Interaction):
