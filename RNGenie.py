@@ -75,6 +75,11 @@ def _advance_turn_snake(session: dict) -> None:
     If no items remain, mark the session as complete by setting current_turn
     beyond the last index (uses len(session['rolls'])).
     """
+    # Debug: trace turn advancement
+    try:
+        print(f"[RNGenie] advance_turn start: turn={session.get('current_turn')} round={session.get('round')} direction={session.get('direction')} items_left={_are_items_left(session)} time={time.time()}")
+    except Exception:
+        pass
     session["just_reversed"] = False
     if not _are_items_left(session):
         session["current_turn"] = len(session["rolls"])
@@ -101,6 +106,10 @@ def _advance_turn_snake(session: dict) -> None:
         # record deletion time so the refresh path will respect the grace period
         try:
             session["last_item_deleted_at"] = time.time()
+        except Exception:
+            pass
+        try:
+            print(f"[RNGenie] advance_turn end: new_turn={session.get('current_turn')} round={session.get('round')} direction={session.get('direction')} just_reversed={session.get('just_reversed')} time={time.time()}")
         except Exception:
             pass
 
@@ -601,6 +610,12 @@ class ItemDropdownView(nextcord.ui.View):
             "assigned_numbers": assigned_numbers
         }
 
+        # Debug: record assignment intent
+        try:
+            print(f"[RNGenie] on_assign: session={self.session_id} user={interaction.user.id} selected={selected} time={time.time()}")
+        except Exception:
+            pass
+
         # Acknowledge the interaction then delete the current picker message so
         # it disappears while we sync other messages. Do the delete in the
         # background to avoid blocking the interaction flow.
@@ -608,6 +623,13 @@ class ItemDropdownView(nextcord.ui.View):
         try:
             msg = getattr(interaction, "message", None)
             if msg:
+                # clear the stored dropdown id immediately to avoid a race
+                # where refresh edits the old message and the background
+                # deletion then removes it.
+                try:
+                    session["item_dropdown_message_id"] = None
+                except Exception:
+                    pass
                 _schedule_bg_task(self.session_id, msg.delete())
                 try:
                     session["last_item_deleted_at"] = time.time()
@@ -625,17 +647,22 @@ class ItemDropdownView(nextcord.ui.View):
             remaining = [it for it in session["items"] if it.get("display_number") not in set(assigned_numbers)]
             session["items"] = remaining + assigned_items
 
-        session["selected_items"] = None
-        _advance_turn_snake(session)
-        # Reset timeout in background so the handler returns quickly
-        try:
-            _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
-        except Exception:
-            pass
-        # Recreate the picker after other messages have been synced. We deleted
-        # the picker above, so schedule an immediate refresh that will create
-        # it (delete_item=False) to reduce perceived latency.
-        _schedule_refresh_now(self.session_id, delete_item=False)
+            session["selected_items"] = None
+            # Advance turn and trace
+            _advance_turn_snake(session)
+            # Reset timeout in background so the handler returns quickly
+            try:
+                _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
+            except Exception:
+                pass
+            # Recreate the picker after other messages have been synced. We deleted
+            # the picker above, so schedule an immediate refresh that will create
+            # it (delete_item=False) to reduce perceived latency.
+            try:
+                print(f"[RNGenie] on_assign scheduling immediate refresh: session={self.session_id} current_turn={session.get('current_turn')} items_left={_are_items_left(session)} time={time.time()}")
+            except Exception:
+                pass
+            _schedule_refresh_now(self.session_id, delete_item=False)
 
     async def on_skip(self, interaction: nextcord.Interaction):
         """
@@ -680,6 +707,10 @@ class ItemDropdownView(nextcord.ui.View):
         try:
             msg = getattr(interaction, "message", None)
             if msg:
+                try:
+                    session["item_dropdown_message_id"] = None
+                except Exception:
+                    pass
                 _schedule_bg_task(self.session_id, msg.delete())
                 try:
                     session["last_item_deleted_at"] = time.time()
@@ -1186,6 +1217,10 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True, ignor
     session = loot_sessions.get(session_id)
     if not session:
         return
+    try:
+        print(f"[RNGenie] refresh start: session={session_id} delete_item={delete_item} ignore_last_del={ignore_last_del} current_turn={session.get('current_turn')} items_left={_are_items_left(session)} time={time.time()}")
+    except Exception:
+        pass
     lock = session_locks.setdefault(session_id, asyncio.Lock())
     async with lock:
         ch = bot.get_channel(session["channel_id"])
@@ -1353,18 +1388,50 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True, ignor
 
         # Either edit the existing item message (if allowed) or send a fresh one.
         if existing_item_msg and not delete_item:
-            # Try editing the existing item message but do it in background
-            async def _bg_edit_item_existing():
-                try:
-                    await existing_item_msg.edit(content=item_text, view=view)
-                    session["item_dropdown_message_id"] = existing_item_id
-                except Exception:
+            # Decide whether to edit the existing message or create a fresh one.
+            # If an immediate refresh was requested or we've already cleared
+            # session['item_dropdown_message_id'] (meaning deletion was scheduled),
+            # prefer sending a new picker to avoid editing a message that will
+            # shortly be deleted.
+            last_del = session.get("last_item_deleted_at")
+            prefer_send = bool(ignore_last_del or session.get("item_dropdown_message_id") is None or (last_del and (time.time() - float(last_del) < REFRESH_DEBOUNCE_SECONDS)))
+            if prefer_send:
+                # create new picker (synchronous if immediate refresh)
+                if ignore_last_del:
                     try:
-                        session["item_dropdown_message_id"] = None
+                        new_msg = await ch.send(item_text, view=view)
+                        session["item_dropdown_message_id"] = new_msg.id
                     except Exception:
-                        pass
-            _schedule_bg_task(session_id, _bg_edit_item_existing())
-            return
+                        try:
+                            session["item_dropdown_message_id"] = None
+                        except Exception:
+                            pass
+                    return
+                else:
+                    async def _bg_send_item_existing():
+                        try:
+                            new_msg = await ch.send(item_text, view=view)
+                            session["item_dropdown_message_id"] = new_msg.id
+                        except Exception:
+                            try:
+                                session["item_dropdown_message_id"] = None
+                            except Exception:
+                                pass
+                    _schedule_bg_task(session_id, _bg_send_item_existing())
+                    return
+            else:
+                # Try editing the existing item message in background
+                async def _bg_edit_item_existing():
+                    try:
+                        await existing_item_msg.edit(content=item_text, view=view)
+                        session["item_dropdown_message_id"] = existing_item_id
+                    except Exception:
+                        try:
+                            session["item_dropdown_message_id"] = None
+                        except Exception:
+                            pass
+                _schedule_bg_task(session_id, _bg_edit_item_existing())
+                return
 
         # Ensure we wait at least REFRESH_DEBOUNCE_SECONDS after the most recent
         # deletion to avoid racey UI where the new picker appears before other edits finish.
@@ -1381,9 +1448,21 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True, ignor
                 except Exception:
                     pass
 
-        # Send the item picker in the background and return immediately so
-        # the refresh call is fast. The background task will set the
-        # session['item_dropdown_message_id'] when successful.
+        # Create the item picker. For immediate refresh callers (ignore_last_del=True)
+        # send synchronously so the picker appears reliably before the handler
+        # returns. For debounced/background refreshes, send in background to
+        # avoid blocking.
+        if ignore_last_del:
+            try:
+                new_msg = await ch.send(item_text, view=view)
+                session["item_dropdown_message_id"] = new_msg.id
+            except Exception:
+                try:
+                    session["item_dropdown_message_id"] = None
+                except Exception:
+                    pass
+            return
+
         async def _bg_send_item():
             try:
                 new_msg = await ch.send(item_text, view=view)
@@ -1455,7 +1534,7 @@ def _schedule_refresh_now(session_id: int, delete_item: bool = True) -> asyncio.
             pass
 
     try:
-        t = asyncio.create_task(_refresh_all_messages(session_id, delete_item=delete_item))
+        t = asyncio.create_task(_refresh_all_messages(session_id, delete_item=delete_item, ignore_last_del=True))
         session["refresh_task"] = t
         return t
     except Exception:
