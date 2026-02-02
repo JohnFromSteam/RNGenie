@@ -4,7 +4,6 @@ import os
 import random
 import re
 import asyncio
-import typing
 import time
 from dotenv import load_dotenv
 import nextcord
@@ -38,10 +37,6 @@ session_locks: dict[int, asyncio.Lock] = {}
 SESSION_TIMEOUT_SECONDS = 600  # seconds of inactivity before session times out
 TURN_NOT_STARTED = -1  # sentinel for "no turn has begun yet"
 
-# How long to wait to coalesce multiple refresh requests (seconds)
-# Use 0.5s as the debounce/grace window per latest UX request
-REFRESH_DEBOUNCE_SECONDS = 0.5
-
 # emoji mapping for numbered players (1..10) + fallback for higher counts
 NUMBER_EMOJIS = {
     1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣",
@@ -55,19 +50,6 @@ def _are_items_left(session: dict) -> bool:
     """Return True if any item has not yet been assigned."""
     return any(it.get("assigned_to") is None for it in session["items"])
 
-
-def _schedule_bg_task(session_id: int, coro: typing.Awaitable) -> asyncio.Task | None:
-    """Schedule a background task and store a reference on the session to avoid
-    premature garbage collection. Returns the created Task or None on error."""
-    session = loot_sessions.get(session_id)
-    try:
-        t = asyncio.create_task(coro)
-        if session is not None:
-            session.setdefault("_bg_tasks", []).append(t)
-        return t
-    except Exception:
-        return None
-
 def _advance_turn_snake(session: dict) -> None:
     """
     Advance the current_turn index using snake draft logic.
@@ -75,11 +57,6 @@ def _advance_turn_snake(session: dict) -> None:
     If no items remain, mark the session as complete by setting current_turn
     beyond the last index (uses len(session['rolls'])).
     """
-    # Debug: trace turn advancement
-    try:
-        print(f"[RNGenie] advance_turn start: turn={session.get('current_turn')} round={session.get('round')} direction={session.get('direction')} items_left={_are_items_left(session)} time={time.time()}")
-    except Exception:
-        pass
     session["just_reversed"] = False
     if not _are_items_left(session):
         session["current_turn"] = len(session["rolls"])
@@ -103,15 +80,6 @@ def _advance_turn_snake(session: dict) -> None:
         # if there's only one roller, ensure index stays valid
         if num == 1:
             session["current_turn"] = 0
-        # record deletion time so the refresh path will respect the grace period
-        try:
-            session["last_item_deleted_at"] = time.time()
-        except Exception:
-            pass
-        try:
-            print(f"[RNGenie] advance_turn end: new_turn={session.get('current_turn')} round={session.get('round')} direction={session.get('direction')} just_reversed={session.get('just_reversed')} time={time.time()}")
-        except Exception:
-            pass
 
 def _build_roll_lines(rolls: list) -> str:
     """
@@ -162,10 +130,17 @@ def build_loot_list_message(session: dict) -> str:
     Shows remaining items or a completion block.
     """
     header = f"**(1/2)**\n"
-    body = build_loot_list_body(session)
-    if body:
+    remaining = [it for it in session["items"] if it["assigned_to"] is None]
+    if remaining:
+        body = (
+            "```ansi\n"
+            f"{RED}{BOLD}❌ Remaining Loot Items ❌{RESET}\n"
+            "==================================\n"
+        )
+        for it in remaining:
+            body += f"{RED}{it['display_number']}.{RESET} {it['name']}\n"
+        body += "```"
         return f"{header}{body}"
-    # Fallback: no items present
     return (
         f"{header}"
         "```ansi\n"
@@ -174,54 +149,6 @@ def build_loot_list_message(session: dict) -> str:
         "All items have been distributed.\n"
         "```"
     )
-
-
-def build_loot_list_body(session: dict) -> str:
-    """Return the body (without header) for the loot list: remaining items
-    followed by assigned items appended at the end."""
-    remaining = [it for it in session["items"] if it["assigned_to"] is None]
-    assigned = [it for it in session["items"] if it["assigned_to"]]
-
-    # If there are any items, compose a single code block listing remaining
-    # items first, then assigned items appended below.
-    if not remaining and not assigned:
-        return ""
-
-    body = "```ansi\n"
-    if remaining:
-        body += f"{RED}{BOLD}❌ Remaining Loot Items ❌{RESET}\n"
-        body += "==================================\n"
-        for it in remaining:
-            body += f"{RED}{it['display_number']}.{RESET} {it['name']}\n"
-        body += "\n"
-
-    if assigned:
-        # Do not show assigned items in the remaining list; this list should
-        # only show items that remain unassigned.
-        pass
-
-    body += "```"
-    return body
-
-
-def build_last_assigned_block(session: dict) -> str:
-    """Return a code-block string (no header) containing the last assigned items.
-    If no last_action snapshot exists, return an empty string."""
-    last = session.get("last_action") or {}
-    indices = last.get("assigned_indices") or []
-    if not indices:
-        return ""
-    body = (
-        "```ansi\n"
-        f"{MAGENTA}{BOLD}📝 Last Assigned Loot Items 📝{RESET}\n"
-        "==================================\n"
-    )
-    for idx in indices:
-        if 0 <= idx < len(session["items"]):
-            it = session["items"][idx]
-            body += f"{MAGENTA}{it['display_number']}.{RESET} {it['name']}\n"
-    body += "```"
-    return body
 
 def build_last_assigned_message(session: dict) -> str:
     """
@@ -246,16 +173,7 @@ def build_last_assigned_message(session: dict) -> str:
             it = session["items"][idx]
             body += f"{MAGENTA}{it['display_number']}.{RESET} {it['name']}\n"
     body += "```"
-    final = header + body
-    # append expiry timer if available
-    expires = session.get("expires_at")
-    if expires:
-        try:
-            ts = int(expires)
-            final += f"\n⏳ Expires: <t:{ts}:R>"
-        except Exception:
-            pass
-    return final
+    return f"{header}{body}"
 
 def build_control_panel_message(session: dict) -> str:
     """
@@ -271,11 +189,16 @@ def build_control_panel_message(session: dict) -> str:
         "```"
     )
 
+    # Collect assigned items and sort them by the order they were assigned
+    # This ensures new items added to a person's list appear at the end.
+    assigned_items = [it for it in session["items"] if it["assigned_to"]]
+    assigned_items.sort(key=lambda x: x.get("assigned_order", 0))
+
     # Map member id -> list of assigned item names for display
     assigned_map = {r["member"].id: [] for r in session["rolls"]}
-    for it in session["items"]:
-        if it["assigned_to"]:
-            assigned_map.setdefault(it["assigned_to"], []).append(it["name"])
+    for it in assigned_items:
+        assigned_map.setdefault(it["assigned_to"], []).append(it["name"])
+
     assigned_block = (
         "```ansi\n"
         f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}\n"
@@ -325,10 +248,14 @@ def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
         "```"
     )
 
+    # Sort items by assignment order
+    assigned_items = [it for it in session["items"] if it["assigned_to"]]
+    assigned_items.sort(key=lambda x: x.get("assigned_order", 0))
+
     assigned_map = {r["member"].id: [] for r in session["rolls"]}
-    for it in session["items"]:
-        if it["assigned_to"]:
-            assigned_map.setdefault(it["assigned_to"], []).append(it["name"])
+    for it in assigned_items:
+        assigned_map.setdefault(it["assigned_to"], []).append(it["name"])
+
     assigned_block = (
         "```ansi\n"
         f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}\n"
@@ -358,16 +285,7 @@ def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
         for it in unclaimed:
             unclaimed_block += f"{RED}{it['display_number']}.{RESET} {it['name']}\n"
         unclaimed_block += "```"
-    final = f"{header}{roll_block}\n{assigned_block}\n{unclaimed_block}"
-    # append expiry timer if available (useful when showing finalize UI)
-    expires = session.get("expires_at")
-    if expires:
-        try:
-            ts = int(expires)
-            final += f"\n⏳ Expires: <t:{ts}:R>"
-        except Exception:
-            pass
-    return final
+    return f"{header}{roll_block}\n{assigned_block}\n{unclaimed_block}"
 
 def _item_message_text_and_active(session: dict) -> tuple[str, bool]:
     """
@@ -383,7 +301,70 @@ def _item_message_text_and_active(session: dict) -> tuple[str, bool]:
     turn_text = "turn!" if not session.get("just_reversed", False) else "turn (direction reversed)!"
     return (f"**{emoji} {picker.mention}'s {turn_text}**\n\nChoose items below...", True)
 
-# ---------- UI Views: Item dropdown view and Control panel view ----------
+# ---------- UI Views: Item dropdown view, Add Item Modal, and Control panel view ----------
+
+class AddItemModal(nextcord.ui.Modal):
+    """
+    Modal for the Loot Master to add a new item dynamically during distribution.
+    """
+    def __init__(self, session_id: int):
+        super().__init__("Add Loot Item")
+        self.session_id = session_id
+        self.item_input = nextcord.ui.TextInput(
+            label="Item Name (supports '2x Item' syntax)",
+            placeholder="e.g. 1x Mysterious Orb",
+            required=True,
+            style=nextcord.TextInputStyle.short,
+            max_length=100
+        )
+        self.add_item(self.item_input)
+
+    async def callback(self, interaction: nextcord.Interaction):
+        session = loot_sessions.get(self.session_id)
+        if not session:
+            await interaction.response.send_message("Session expired.", ephemeral=True)
+            return
+
+        # Parse input
+        s = self.item_input.value.strip()
+        names = []
+        if s:
+            m = re.match(r"(\d+)[xX]\s*(.*)", s)
+            if m:
+                try:
+                    c = int(m.group(1))
+                    nm = m.group(2).strip()
+                    if nm:
+                        names.extend([nm] * c)
+                    else:
+                        names.append(s)
+                except Exception:
+                    names.append(s)
+            else:
+                names.append(s)
+        
+        if not names:
+            await interaction.response.send_message("Invalid item name.", ephemeral=True)
+            return
+
+        # Determine next display number
+        current_max = 0
+        for it in session["items"]:
+            try:
+                if it["display_number"] > current_max:
+                    current_max = it["display_number"]
+            except:
+                pass
+        
+        new_items = [{"name": n, "assigned_to": None, "display_number": current_max + i + 1} for i, n in enumerate(names)]
+        session["items"].extend(new_items)
+        
+        await _reset_session_timeout(self.session_id)
+        # We need to refresh the views. 
+        # Sending a response is required to close the modal cleanly.
+        await interaction.response.defer(ephemeral=True)
+        _schedule_refresh(self.session_id, delete_item=True)
+
 class ItemDropdownView(nextcord.ui.View):
     """
     Dropdown view that shows all currently available items for the active picker.
@@ -425,12 +406,19 @@ class ItemDropdownView(nextcord.ui.View):
             placeholder = "Choose items..." if len(chunks) == 1 else f"Choose items ({chunk[0][1]['display_number']}-{chunk[-1][1]['display_number']})..."
             self.add_item(nextcord.ui.Select(placeholder=placeholder, options=opts, custom_id=f"item_select_{ci}", min_values=0, max_values=len(opts)))
 
-        # Buttons: Assign Selected (enabled only if something selected), Skip Turn, Undo (if available)
+        # Row 1: Assign, Skip, Undo
         assign_disabled = not session.get("selected_items")
-        self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.success, emoji="✅", custom_id="assign_button", disabled=assign_disabled))
-        self.add_item(nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button"))
+        self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.success, emoji="✅", custom_id="assign_button", disabled=assign_disabled, row=1))
+        self.add_item(nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button", row=1))
+        
+        # New Button: Skip On Remaining Loot
+        self.add_item(nextcord.ui.Button(label="Skip On Remaining Loot", style=nextcord.ButtonStyle.danger, custom_id="skip_remaining_button", row=1))
+        
         undo_disabled = not session.get("last_action")
-        self.add_item(nextcord.ui.Button(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=undo_disabled))
+        self.add_item(nextcord.ui.Button(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=undo_disabled, row=1))
+
+        # Row 2: Add Item (Loot Master only)
+        self.add_item(nextcord.ui.Button(label="Add Item", style=nextcord.ButtonStyle.primary, emoji="➕", custom_id="add_item_button", row=2))
 
         # wire callbacks for each element
         for child in self.children:
@@ -438,8 +426,12 @@ class ItemDropdownView(nextcord.ui.View):
                 child.callback = self.on_assign
             if getattr(child, "custom_id", None) == "skip_button":
                 child.callback = self.on_skip
+            if getattr(child, "custom_id", None) == "skip_remaining_button":
+                child.callback = self.on_skip_remaining
             if getattr(child, "custom_id", None) == "undo_button":
                 child.callback = self.on_undo
+            if getattr(child, "custom_id", None) == "add_item_button":
+                child.callback = self.on_add_item
             if getattr(child, "custom_id", "").startswith("item_select_"):
                 child.callback = self.on_item_select
 
@@ -552,35 +544,8 @@ class ItemDropdownView(nextcord.ui.View):
             current |= newly
             session["selected_items"] = list(current)
 
-        # Persist selection and acknowledge; do not attempt to programmatically
-        # collapse the dropdown (client behavior is inconsistent).
         await self._ack(interaction)
-        # Reset the session timeout in the background to avoid blocking the
-        # interaction response; this keeps the UI responsive for the user.
-        try:
-            _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
-        except Exception:
-            pass
-        # Try to quickly edit the existing picker message in-place so the
-        # dropdown updates immediately for the user. Fall back to a refresh
-        # if editing isn't possible.
-        try:
-            session = loot_sessions.get(self.session_id)
-            if session:
-                ch = bot.get_channel(session["channel_id"])
-                existing_id = session.get("item_dropdown_message_id")
-                if ch and existing_id:
-                    msg = await _get_msg(ch, existing_id)
-                    if msg:
-                        # Build current item text and view and edit in-place
-                        item_text, is_active = _item_message_text_and_active(session)
-                        view = ItemDropdownView(self.session_id) if is_active else None
-                        await msg.edit(content=item_text, view=view)
-                        session["item_dropdown_message_id"] = msg.id
-                        return
-        except Exception:
-            pass
-
+        await _reset_session_timeout(self.session_id)
         # refresh messages without forcing item deletion (preserve dropdown when possible)
         _schedule_refresh(self.session_id, delete_item=False)
 
@@ -613,76 +578,35 @@ class ItemDropdownView(nextcord.ui.View):
             return
 
         selected = session.get("selected_items") or []
-
-        # Record undo snapshot using both indices and stable display numbers
-        assigned_indices = [int(i) for i in selected] if selected else []
-        assigned_numbers = []
-        for i in assigned_indices:
-            if 0 <= i < len(session["items"]):
-                assigned_numbers.append(session["items"][i].get("display_number"))
-
         session["last_action"] = {
             "turn": session["current_turn"],
             "round": session["round"],
             "direction": session["direction"],
             "just_reversed": session.get("just_reversed", False),
-            "assigned_indices": assigned_indices,
-            "assigned_numbers": assigned_numbers
+            "assigned_indices": [int(i) for i in selected] if selected else []
         }
 
-        # Debug: record assignment intent
-        try:
-            print(f"[RNGenie] on_assign: session={self.session_id} user={interaction.user.id} selected={selected} time={time.time()}")
-        except Exception:
-            pass
-
-        # Acknowledge the interaction then delete the current picker message so
-        # it disappears while we sync other messages. Do the delete in the
-        # background to avoid blocking the interaction flow.
-        await self._ack(interaction)
-        try:
-            msg = getattr(interaction, "message", None)
-            if msg:
-                # clear the stored dropdown id immediately to avoid a race
-                # where refresh edits the old message and the background
-                # deletion then removes it.
-                try:
-                    session["item_dropdown_message_id"] = None
-                except Exception:
-                    pass
-                _schedule_bg_task(self.session_id, msg.delete())
-                try:
-                    session["last_item_deleted_at"] = time.time()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        # Move the selected items to the bottom and mark them assigned to the picker
-        if assigned_numbers:
-            mapping = {it.get("display_number"): it for it in session["items"]}
-            assigned_items = [mapping[n] for n in assigned_numbers if n in mapping]
-            for it in assigned_items:
-                it["assigned_to"] = picker.id
-            remaining = [it for it in session["items"] if it.get("display_number") not in set(assigned_numbers)]
-            session["items"] = remaining + assigned_items
-
-            session["selected_items"] = None
-            # Advance turn and trace
-            _advance_turn_snake(session)
-            # Reset timeout in background so the handler returns quickly
+        # Apply assignment and assignment order
+        for s in selected:
             try:
-                _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
+                idx = int(s)
             except Exception:
-                pass
-            # Recreate the picker after other messages have been synced. We deleted
-            # the picker above, so schedule an immediate refresh that will create
-            # it (delete_item=False) to reduce perceived latency.
-            try:
-                print(f"[RNGenie] on_assign scheduling immediate refresh: session={self.session_id} current_turn={session.get('current_turn')} items_left={_are_items_left(session)} time={time.time()}")
-            except Exception:
-                pass
-            _schedule_refresh_now(self.session_id, delete_item=False)
+                continue
+            if 0 <= idx < len(session["items"]):
+                session["items"][idx]["assigned_to"] = picker.id
+                session["items"][idx]["assigned_order"] = session["assignment_counter"]
+                session["assignment_counter"] += 1
+
+        session["selected_items"] = None
+        _advance_turn_snake(session)
+        await _reset_session_timeout(self.session_id)
+
+        new_text, active = _item_message_text_and_active(session)
+        new_view = ItemDropdownView(self.session_id) if active else None
+
+        edited = await self._fast_edit(interaction, new_text, new_view)
+        # after assignment, force delete+recreate of the item message to ensure a fresh state
+        _schedule_refresh(self.session_id, delete_item=True)
 
     async def on_skip(self, interaction: nextcord.Interaction):
         """
@@ -720,31 +644,71 @@ class ItemDropdownView(nextcord.ui.View):
             session["members_to_remove"] = None
             session["last_action"] = None
 
-        # Acknowledge and delete the current picker so it isn't visible while
-        # we sync the loot/control messages. Perform deletion in background
-        # to keep the interaction responsive.
-        await self._ack(interaction)
-        try:
-            msg = getattr(interaction, "message", None)
-            if msg:
-                try:
-                    session["item_dropdown_message_id"] = None
-                except Exception:
-                    pass
-                _schedule_bg_task(self.session_id, msg.delete())
-                try:
-                    session["last_item_deleted_at"] = time.time()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
         _advance_turn_snake(session)
+        await _reset_session_timeout(self.session_id)
+
+        new_text, active = _item_message_text_and_active(session)
+        new_view = ItemDropdownView(self.session_id) if active else None
+
+        await self._fast_edit(interaction, new_text, new_view)
+        _schedule_refresh(self.session_id, delete_item=True)
+
+    async def on_skip_remaining(self, interaction: nextcord.Interaction):
+        """
+        Removes the current picker from the rotation for the rest of the distribution.
+        Allowed for: Current picker or Loot Master.
+        """
+        session = loot_sessions.get(self.session_id)
+        if not session:
+            try:
+                await interaction.response.send_message("Session expired.", ephemeral=True)
+            except: pass
+            return
+
+        if not (0 <= session["current_turn"] < len(session["rolls"])):
+            try:
+                await interaction.response.send_message("No active turn.", ephemeral=True)
+            except: pass
+            return
+
+        current_roller = session["rolls"][session["current_turn"]]
+        picker_member = current_roller["member"]
+        
+        # Permission check
+        if interaction.user.id not in (picker_member.id, session["invoker_id"]):
+             try:
+                await interaction.response.send_message("🛡️ Only the current picker or the Loot Manager can use this.", ephemeral=True)
+             except: pass
+             return
+
+        # Snapshot for undo isn't perfectly supported for 'Remove User' via this button, 
+        # but we do minimal tracking so standard undo doesn't crash, though it won't restore the user easily.
+        # (Standard undo logic simply restores items and index; restoring a deleted user is out of scope 
+        # for simple undo, so we clear last_action to prevent broken state).
+        session["last_action"] = None 
+
+        # Remove the user
+        session["rolls"].pop(session["current_turn"])
+
+        # Adjust current_turn index if necessary
+        # If we removed the last person in the list, index is now out of bounds
+        if session["current_turn"] >= len(session["rolls"]):
+             session["current_turn"] = max(0, len(session["rolls"]) - 1)
+        
+        # If the list is now empty
+        if not session["rolls"]:
+            # Cancel logic (simplified from on_remove_confirm)
+            session["current_turn"] = len(session["rolls"]) # mark done-ish
+            
+        session["selected_items"] = None
+        
+        await _reset_session_timeout(self.session_id)
+        
+        # Force refresh
         try:
-            _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
-        except Exception:
-            pass
-        _schedule_refresh_now(self.session_id, delete_item=False)
+            await interaction.response.defer()
+        except: pass
+        _schedule_refresh(self.session_id, delete_item=True)
 
     async def on_undo(self, interaction: nextcord.Interaction):
         """
@@ -774,26 +738,11 @@ class ItemDropdownView(nextcord.ui.View):
                 pass
             return
 
-        # Prefer stable display numbers for undoing since indices may have shifted
-        assigned_numbers = last.get("assigned_numbers") or []
-        if not assigned_numbers:
-            # Fallback: convert stored indices to display numbers where possible
-            for idx in last.get("assigned_indices", []):
-                if 0 <= idx < len(session["items"]):
-                    num = session["items"][idx].get("display_number")
-                    if num:
-                        assigned_numbers.append(num)
-
-        if assigned_numbers:
-            for num in assigned_numbers:
-                for it in session["items"]:
-                    if it.get("display_number") == num:
-                        it["assigned_to"] = None
-                        break
-            # Rebuild ordering: remaining then assigned
-            remaining = [it for it in session["items"] if it["assigned_to"] is None]
-            assigned = [it for it in session["items"] if it["assigned_to"]]
-            session["items"] = remaining + assigned
+        for idx in last.get("assigned_indices", []):
+            if 0 <= idx < len(session["items"]):
+                session["items"][idx]["assigned_to"] = None
+                # Clear order to keep data clean, though re-assigning will overwrite it
+                session["items"][idx]["assigned_order"] = -1
 
         session["current_turn"] = last["turn"]
         session["round"] = last["round"]
@@ -802,29 +751,30 @@ class ItemDropdownView(nextcord.ui.View):
         session["last_action"] = None
         session["selected_items"] = None
 
-        # Acknowledge immediately, reset timeout in background, then refresh.
-        await self._ack(interaction)
-        try:
-            _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
-        except Exception:
-            pass
-        # Try to edit the existing item picker in-place to avoid creating a
-        # duplicate third message. If that fails, schedule an immediate refresh
-        # to recreate the picker.
-        try:
-            ch = bot.get_channel(session["channel_id"])
-            existing_id = session.get("item_dropdown_message_id")
-            if ch and existing_id:
-                msg = await _get_msg(ch, existing_id)
-                if msg:
-                    item_text, is_active = _item_message_text_and_active(session)
-                    view = ItemDropdownView(self.session_id) if is_active else None
-                    await msg.edit(content=item_text, view=view)
-                    session["item_dropdown_message_id"] = msg.id
-                    return
-        except Exception:
-            pass
-        _schedule_refresh_now(self.session_id, delete_item=False)
+        await _reset_session_timeout(self.session_id)
+        new_text, active = _item_message_text_and_active(session)
+        new_view = ItemDropdownView(self.session_id) if active else None
+        await self._fast_edit(interaction, new_text, new_view)
+        _schedule_refresh(self.session_id, delete_item=True)
+
+    async def on_add_item(self, interaction: nextcord.Interaction):
+        """
+        Open the modal to add an item. Only for Loot Master.
+        """
+        session = loot_sessions.get(self.session_id)
+        if not session:
+            try:
+                 await interaction.response.send_message("Session expired.", ephemeral=True)
+            except: pass
+            return
+
+        if interaction.user.id != session["invoker_id"]:
+            try:
+                await interaction.response.send_message("🛡️ Only the Loot Manager can add items.", ephemeral=True)
+            except: pass
+            return
+            
+        await interaction.response.send_modal(AddItemModal(self.session_id))
 
 class ControlPanelView(nextcord.ui.View):
     """
@@ -932,34 +882,24 @@ class ControlPanelView(nextcord.ui.View):
             session["members_to_remove"] = None
             if not session["rolls"]:
                 ch = bot.get_channel(session["channel_id"])
-                # Delete messages in background to avoid blocking this handler
                 try:
-                    lm_id = session.get("loot_list_message_id")
-                    it_id = session.get("item_dropdown_message_id")
-                    ctrl_id = self.session_id
-                    async def _cleanup_cancel():
-                        try:
-                            lm = await _get_msg(ch, lm_id)
-                            if lm:
-                                await lm.delete()
-                        except Exception:
-                            pass
-                        try:
-                            it = await _get_msg(ch, it_id)
-                            if it:
-                                await it.delete()
-                        except Exception:
-                            pass
-                        try:
-                            ctrl = await _get_msg(ch, ctrl_id)
-                            if ctrl:
-                                await ctrl.edit(content="⚠️ The loot session was cancelled — no participants remain.", view=None)
-                        except Exception:
-                            pass
-                    _schedule_bg_task(self.session_id, _cleanup_cancel())
+                    lm = await _get_msg(ch, session.get("loot_list_message_id"))
+                    if lm:
+                        await lm.delete()
                 except Exception:
                     pass
-                # cancel timeout task if present (best-effort)
+                try:
+                    it = await _get_msg(ch, session.get("item_dropdown_message_id"))
+                    if it:
+                        await it.delete()
+                except Exception:
+                    pass
+                try:
+                    ctrl = await _get_msg(ch, self.session_id)
+                    if ctrl:
+                        await ctrl.edit(content="⚠️ The loot session was cancelled — no participants remain.", view=None)
+                except Exception:
+                    pass
                 t = session.get("timeout_task")
                 if t:
                     try:
@@ -976,16 +916,12 @@ class ControlPanelView(nextcord.ui.View):
             if session["current_turn"] != TURN_NOT_STARTED and session["current_turn"] >= len(session["rolls"]):
                 session["current_turn"] = max(0, len(session["rolls"]) - 1)
 
-        # Reset timeout in background and quickly defer the response
-        try:
-            _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
-        except Exception:
-            pass
+        await _reset_session_timeout(self.session_id)
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
-        _schedule_refresh_now(self.session_id, delete_item=True)
+        _schedule_refresh(self.session_id, delete_item=True)
 
     async def on_start(self, interaction: nextcord.Interaction):
         """
@@ -1002,10 +938,7 @@ class ControlPanelView(nextcord.ui.View):
         session["selected_items"] = None
         session["last_action"] = None
         _advance_turn_snake(session)
-        try:
-            _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
-        except Exception:
-            pass
+        await _reset_session_timeout(self.session_id)
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception:
@@ -1068,11 +1001,6 @@ class FinalizeView(nextcord.ui.View):
                 pass
 
         ch = bot.get_channel(session["channel_id"])
-        # Clear expiry to avoid showing timer in the merged final message
-        try:
-            session["expires_at"] = None
-        except Exception:
-            pass
         final = build_final_summary_message(session, timed_out=False)
         try:
             ctrl = await _get_msg(ch, self.session_id)
@@ -1086,48 +1014,27 @@ class FinalizeView(nextcord.ui.View):
             pass
 
         # delete loot list message
-        # Delete loot list message in background (best-effort)
         try:
-            loot_id = session.get("loot_list_message_id")
-            async def _del_loot():
-                try:
-                    lm = await _get_msg(ch, loot_id)
-                    if lm:
-                        await lm.delete()
-                except Exception:
-                    pass
-            try:
-                session["last_item_deleted_at"] = time.time()
-            except Exception:
-                pass
-            _schedule_bg_task(self.session_id, _del_loot())
+            lm = await _get_msg(ch, session.get("loot_list_message_id"))
+            if lm:
+                await lm.delete()
         except Exception:
             pass
 
         # delete any item message (this finalize message included)
-        # Delete the item dropdown (finalize message) in background
         try:
-            item_id = session.get("item_dropdown_message_id")
-            async def _del_item():
-                try:
-                    maybe = await _get_msg(ch, item_id)
-                    if maybe:
-                        try:
-                            await maybe.delete()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-            try:
-                session["last_item_deleted_at"] = time.time()
-            except Exception:
-                pass
-            _schedule_bg_task(self.session_id, _del_item())
+            existing = session.get("item_dropdown_message_id")
+            if existing:
+                maybe = await _get_msg(ch, existing)
+                if maybe:
+                    try:
+                        await maybe.delete()
+                    except Exception:
+                        pass
         except Exception:
             pass
 
         # cancel timeout and remove session
-        # Cancel timeout task (best-effort)
         t = session.get("timeout_task")
         if t:
             try:
@@ -1165,25 +1072,11 @@ class FinalizeView(nextcord.ui.View):
                 pass
             return
 
-        # Prefer stable display numbers for undoing (more robust if ordering changed)
-        assigned_numbers = last.get("assigned_numbers") or []
-        if not assigned_numbers:
-            for idx in last.get("assigned_indices", []):
-                if 0 <= idx < len(session["items"]):
-                    num = session["items"][idx].get("display_number")
-                    if num:
-                        assigned_numbers.append(num)
-
-        if assigned_numbers:
-            for num in assigned_numbers:
-                for it in session["items"]:
-                    if it.get("display_number") == num:
-                        it["assigned_to"] = None
-                        break
-            # Rebuild ordering: remaining then assigned
-            remaining = [it for it in session["items"] if it["assigned_to"] is None]
-            assigned = [it for it in session["items"] if it["assigned_to"]]
-            session["items"] = remaining + assigned
+        # Undo assigned indices
+        for idx in last.get("assigned_indices", []):
+            if 0 <= idx < len(session["items"]):
+                session["items"][idx]["assigned_to"] = None
+                session["items"][idx]["assigned_order"] = -1
 
         session["current_turn"] = last["turn"]
         session["round"] = last["round"]
@@ -1192,31 +1085,20 @@ class FinalizeView(nextcord.ui.View):
         session["last_action"] = None
         session["selected_items"] = None
 
-        # reset timeout (background) to avoid blocking the interaction
-        try:
-            _schedule_bg_task(self.session_id, _reset_session_timeout(self.session_id))
-        except Exception:
-            pass
+        # reset timeout
+        await _reset_session_timeout(self.session_id)
 
         # delete the finalize message and recreate the normal item dropdown flow
         ch = bot.get_channel(session["channel_id"])
         try:
-            item_id = session.get("item_dropdown_message_id")
-            async def _del_item2():
-                try:
-                    maybe = await _get_msg(ch, item_id)
-                    if maybe:
-                        try:
-                            await maybe.delete()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-            try:
-                session["last_item_deleted_at"] = time.time()
-            except Exception:
-                pass
-            _schedule_bg_task(self.session_id, _del_item2())
+            existing = session.get("item_dropdown_message_id")
+            if existing:
+                maybe = await _get_msg(ch, existing)
+                if maybe:
+                    try:
+                        await maybe.delete()
+                    except Exception:
+                        pass
         except Exception:
             pass
         session["item_dropdown_message_id"] = None
@@ -1246,7 +1128,7 @@ async def _reset_session_timeout(session_id: int):
     except Exception:
         session["expires_at"] = None
 
-async def _refresh_all_messages(session_id: int, delete_item: bool = True, ignore_last_del: bool = False):
+async def _refresh_all_messages(session_id: int, delete_item: bool = True):
     """
     Synchronize the three messages for the session:
       - loot list (left)
@@ -1258,10 +1140,6 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True, ignor
     session = loot_sessions.get(session_id)
     if not session:
         return
-    try:
-        print(f"[RNGenie] refresh start: session={session_id} delete_item={delete_item} ignore_last_del={ignore_last_del} current_turn={session.get('current_turn')} items_left={_are_items_left(session)} time={time.time()}")
-    except Exception:
-        pass
     lock = session_locks.setdefault(session_id, asyncio.Lock())
     async with lock:
         ch = bot.get_channel(session["channel_id"])
@@ -1289,10 +1167,6 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True, ignor
                 await existing_item_msg.delete()
             except Exception:
                 pass
-            try:
-                session["last_item_deleted_at"] = time.time()
-            except Exception:
-                pass
             session["item_dropdown_message_id"] = None
             existing_item_msg = None
             existing_item_id = None
@@ -1305,8 +1179,9 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True, ignor
             # so the control panel shows the 10-minute expiry timer for the invoker.
             await _reset_session_timeout(session_id)
 
-            # build final control content and edit control message (show final summary)
-            final_ctrl = build_final_summary_message(session, timed_out=False)
+
+            # build final control content and edit control message (only if changed)
+            final_ctrl = build_control_panel_message(session)
             try:
                 if control_msg and final_ctrl != session.get("last_control_content"):
                     await control_msg.edit(content=final_ctrl)
@@ -1314,50 +1189,7 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True, ignor
             except Exception:
                 pass
 
-            # show the 'Last Assigned Loot Items' in the left loot list so the
-            # invoker can see what was most recently assigned before finishing.
-            # Do not duplicate assigned items (the last-assigned block is shown
-            # once) and do not append the expiry timer here — the finalize
-            # message contains the timer for the invoker.
-            try:
-                last_block = build_last_assigned_block(session)
-                # Build a remaining-only body (exclude already-assigned items)
-                remaining_items = [it for it in session["items"] if it["assigned_to"] is None]
-                remaining_body = ""
-                if remaining_items:
-                    remaining_body = "```ansi\n"
-                    remaining_body += f"{RED}{BOLD}❌ Remaining Loot Items ❌{RESET}\n"
-                    remaining_body += "==================================\n"
-                    for it in remaining_items:
-                        remaining_body += f"{RED}{it['display_number']}.{RESET} {it['name']}\n"
-                    remaining_body += "```"
-
-                combined = "**(1/2)**\n"
-                if last_block:
-                    combined += last_block
-                if remaining_body:
-                    combined += "\n" + remaining_body
-
-                if loot_msg and combined != session.get("last_loot_content"):
-                    await loot_msg.edit(content=combined)
-                    session["last_loot_content"] = combined
-            except Exception:
-                pass
-
-            # mark that finalize UI is shown so timeout handling knows how to
-            # collapse the last-assigned view into the merged final state.
-            session["finalize_shown"] = True
-
-            # Clear the expiry on finalize UI display to avoid showing a timer
-            # in the finalize message; the control panel already shows expiry.
-            try:
-                session["expires_at"] = None
-            except Exception:
-                pass
-
             # present the finalize message to the invoker (third message) with FinalizeView
-            expires = session.get("expires_at")
-            # Don't include the expiry timer in the finalize message; keep it simple.
             finalize_text = f"✍️ {session['invoker'].mention}\n\nClick an action below to finish or undo the last assignment."
             finalize_view = FinalizeView(session_id)
 
@@ -1365,10 +1197,6 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True, ignor
             if existing_item_msg:
                 try:
                     await existing_item_msg.delete()
-                except Exception:
-                    pass
-                try:
-                    session["last_item_deleted_at"] = time.time()
                 except Exception:
                     pass
 
@@ -1391,30 +1219,21 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True, ignor
         loot_content = build_loot_list_message(session)
         control_content = build_control_panel_message(session)
 
-        # Edit loot message in background to avoid blocking the picker creation.
-        if loot_msg:
-            async def _bg_edit_loot():
-                try:
-                    if loot_content != session.get("last_loot_content"):
-                        await loot_msg.edit(content=loot_content)
-                        session["last_loot_content"] = loot_content
-                except Exception:
-                    pass
-            _schedule_bg_task(session_id, _bg_edit_loot())
+        if loot_content != session.get("last_loot_content") and loot_msg:
+            try:
+                await loot_msg.edit(content=loot_content)
+                session["last_loot_content"] = loot_content
+            except Exception:
+                pass
 
-        # Edit control message in background as well.
-        if control_msg:
-            async def _bg_edit_control():
-                try:
-                    if control_content != session.get("last_control_content"):
-                        await control_msg.edit(content=control_content, view=ControlPanelView(session_id))
-                        session["last_control_content"] = control_content
-                except Exception:
-                    pass
-            _schedule_bg_task(session_id, _bg_edit_control())
+        if control_content != session.get("last_control_content") and control_msg:
+            try:
+                await control_msg.edit(content=control_content, view=ControlPanelView(session_id))
+                session["last_control_content"] = control_content
+            except Exception:
+                pass
 
-        # Reset timeout in background to avoid blocking the refresh.
-        _schedule_bg_task(session_id, _reset_session_timeout(session_id))
+        await _reset_session_timeout(session_id)
 
         # Manage item-picking message: create if active, delete/skip if not
         is_active = (0 <= session["current_turn"] < len(session["rolls"])) and _are_items_left(session)
@@ -1436,183 +1255,37 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True, ignor
 
         # Either edit the existing item message (if allowed) or send a fresh one.
         if existing_item_msg and not delete_item:
-            # Decide whether to edit the existing message or create a fresh one.
-            # If an immediate refresh was requested or we've already cleared
-            # session['item_dropdown_message_id'] (meaning deletion was scheduled),
-            # prefer sending a new picker to avoid editing a message that will
-            # shortly be deleted.
-            last_del = session.get("last_item_deleted_at")
-            prefer_send = bool(ignore_last_del or session.get("item_dropdown_message_id") is None or (last_del and (time.time() - float(last_del) < REFRESH_DEBOUNCE_SECONDS)))
-            if prefer_send:
-                # create new picker (synchronous if immediate refresh)
-                if ignore_last_del:
-                    try:
-                        new_msg = await ch.send(item_text, view=view)
-                        session["item_dropdown_message_id"] = new_msg.id
-                    except Exception:
-                        try:
-                            session["item_dropdown_message_id"] = None
-                        except Exception:
-                            pass
-                    return
-                else:
-                    async def _bg_send_item_existing():
-                        try:
-                            new_msg = await ch.send(item_text, view=view)
-                            session["item_dropdown_message_id"] = new_msg.id
-                        except Exception:
-                            try:
-                                session["item_dropdown_message_id"] = None
-                            except Exception:
-                                pass
-                    _schedule_bg_task(session_id, _bg_send_item_existing())
-                    return
-            else:
-                # Try editing the existing item message in background
-                async def _bg_edit_item_existing():
-                    try:
-                        await existing_item_msg.edit(content=item_text, view=view)
-                        session["item_dropdown_message_id"] = existing_item_id
-                    except Exception:
-                        try:
-                            session["item_dropdown_message_id"] = None
-                        except Exception:
-                            pass
-                _schedule_bg_task(session_id, _bg_edit_item_existing())
+            try:
+                await existing_item_msg.edit(content=item_text, view=view)
+                session["item_dropdown_message_id"] = existing_item_id
                 return
-
-        # Ensure we wait at least REFRESH_DEBOUNCE_SECONDS after the most recent
-        # deletion to avoid racey UI where the new picker appears before other edits finish.
-        # Optionally wait a short grace period after deletions to avoid
-        # racey UI where the new picker appears before other edits finish.
-        # Immediate refresh callers can bypass this by setting ignore_last_del.
-        if not ignore_last_del:
-            last_del = session.get("last_item_deleted_at")
-            if last_del:
-                try:
-                    elapsed = time.time() - float(last_del)
-                    if elapsed < REFRESH_DEBOUNCE_SECONDS:
-                        await asyncio.sleep(REFRESH_DEBOUNCE_SECONDS - elapsed)
-                except Exception:
-                    pass
-
-        # Create the item picker. For immediate refresh callers (ignore_last_del=True)
-        # send synchronously so the picker appears reliably before the handler
-        # returns. For debounced/background refreshes, send in background to
-        # avoid blocking.
-        if ignore_last_del:
-            try:
-                new_msg = await ch.send(item_text, view=view)
-                session["item_dropdown_message_id"] = new_msg.id
             except Exception:
-                try:
-                    session["item_dropdown_message_id"] = None
-                except Exception:
-                    pass
-            return
+                session["item_dropdown_message_id"] = None
+                existing_item_msg = None
 
-        async def _bg_send_item():
-            try:
-                new_msg = await ch.send(item_text, view=view)
-                session["item_dropdown_message_id"] = new_msg.id
-            except Exception:
-                try:
-                    session["item_dropdown_message_id"] = None
-                except Exception:
-                    pass
-        _schedule_bg_task(session_id, _bg_send_item())
-        return
+        try:
+            new_msg = await ch.send(item_text, view=view)
+            session["item_dropdown_message_id"] = new_msg.id
+        except Exception:
+            session["item_dropdown_message_id"] = None
 
 
 def _schedule_refresh(session_id: int, delete_item: bool = True) -> asyncio.Task | None:
     """
-    Debounced schedule for refreshes. Multiple calls within
-    REFRESH_DEBOUNCE_SECONDS will coalesce into a single refresh.
-    Stores the running refresh Task on session['refresh_task'] to avoid
-    GC cancellation races and returns that Task.
+    Schedule a stored refresh task for a session. This helper cancels any
+    previously scheduled refresh task on the session and stores the new task
+    in session['refresh_task'] so it isn't garbage-collected prematurely.
+    Returns the scheduled Task or None if scheduling failed.
     """
     session = loot_sessions.get(session_id)
     if not session:
         return None
-
-    # Cancel any previously queued debounce waiter
-    debounce = session.get("_refresh_debounce_task")
-    if debounce and not debounce.done():
-        try:
-            debounce.cancel()
-        except Exception:
-            pass
-
-    # Schedule a short-delay debounced coroutine that will create the real
-    # refresh task after the debounce window. Store the debounce task so
-    # subsequent callers can cancel/reschedule it.
-    try:
-        d = asyncio.create_task(_debounced_refresh(session_id, delete_item))
-        session["_refresh_debounce_task"] = d
-        return d
-    except Exception:
-        return None
-
-
-def _schedule_refresh_now(session_id: int, delete_item: bool = True) -> asyncio.Task | None:
-    """
-    Immediately schedule a refresh (bypassing the short debounce). This is
-    used in hot paths where we want the picker recreated as soon as possible
-    after an assign/skip/start/undo action. The running refresh Task is
-    stored on session['refresh_task'] to avoid GC cancellation races.
-    """
-    session = loot_sessions.get(session_id)
-    if not session:
-        return None
-
-    # Cancel any queued debounce waiter
-    debounce = session.get("_refresh_debounce_task")
-    if debounce and not debounce.done():
-        try:
-            debounce.cancel()
-        except Exception:
-            pass
-
-    # Cancel any previous running refresh (we'll replace it)
     prev = session.get("refresh_task")
     if prev and not prev.done():
         try:
             prev.cancel()
         except Exception:
             pass
-
-    try:
-        t = asyncio.create_task(_refresh_all_messages(session_id, delete_item=delete_item, ignore_last_del=True))
-        session["refresh_task"] = t
-        return t
-    except Exception:
-        session["refresh_task"] = None
-        return None
-
-
-async def _debounced_refresh(session_id: int, delete_item: bool):
-    """Wait REFRESH_DEBOUNCE_SECONDS then run the actual _refresh_all_messages
-    and record the running task on session['refresh_task'] so it isn't
-    garbage-collected prematurely.
-    """
-    try:
-        await asyncio.sleep(REFRESH_DEBOUNCE_SECONDS)
-    except asyncio.CancelledError:
-        return None
-
-    session = loot_sessions.get(session_id)
-    if not session:
-        return None
-
-    # If a previous running refresh task exists, cancel it; we will replace
-    # it with a fresh task for this run.
-    prev = session.get("refresh_task")
-    if prev and not prev.done():
-        try:
-            prev.cancel()
-        except Exception:
-            pass
-
     try:
         t = asyncio.create_task(_refresh_all_messages(session_id, delete_item=delete_item))
         session["refresh_task"] = t
@@ -1635,11 +1308,6 @@ async def _schedule_session_timeout(session_id: int):
     session_locks.pop(session_id, None)
     if not session:
         return
-    # Clear expiry as we're now finalizing due to timeout; don't show a timer
-    try:
-        session["expires_at"] = None
-    except Exception:
-        pass
     ch = bot.get_channel(session["channel_id"])
     if not ch:
         return
@@ -1782,7 +1450,8 @@ class LootModal(nextcord.ui.Modal):
             "last_action": None,
             "last_control_content": None,
             "last_loot_content": None,
-            "timeout_task": None
+            "timeout_task": None,
+            "assignment_counter": 0
         }
         loot_sessions[session_id] = session
         await _reset_session_timeout(session_id)
