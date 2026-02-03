@@ -299,7 +299,7 @@ def _item_message_text_and_active(session: dict) -> tuple[str, bool]:
     picker = session["rolls"][session["current_turn"]]["member"]
     emoji = NUMBER_EMOJIS.get(session["current_turn"] + 1, "👉")
     turn_text = "turn!" if not session.get("just_reversed", False) else "turn (direction reversed)!"
-    return (f"**{emoji} {picker.mention}'s {turn_text}**\n\nChoose items below...", True)
+    return (f"**{emoji} {picker.mention}'s {turn_text}**\n\nChoose item(s) below:", True)
 
 # ---------- UI Views: Item dropdown view, Add Item Modal, and Control panel view ----------
 
@@ -403,7 +403,7 @@ class ItemDropdownView(nextcord.ui.View):
                 truncated = (label[:97] + "...") if len(label) > 100 else label
                 default = str(idx) in selected
                 opts.append(nextcord.SelectOption(label=truncated, value=str(idx), default=default))
-            placeholder = "Choose items..." if len(chunks) == 1 else f"Choose items ({chunk[0][1]['display_number']}-{chunk[-1][1]['display_number']})..."
+            placeholder = "Choose item(s)" if len(chunks) == 1 else f"Choose item(s) ({chunk[0][1]['display_number']}-{chunk[-1][1]['display_number']})..."
             self.add_item(nextcord.ui.Select(placeholder=placeholder, options=opts, custom_id=f"item_select_{ci}", min_values=0, max_values=len(opts)))
 
         # Row 1: Assign, Skip, Undo
@@ -1249,7 +1249,7 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
         picker = session["rolls"][session["current_turn"]]["member"]
         emoji = NUMBER_EMOJIS.get(session["current_turn"] + 1, "👉")
         turn_text = "turn!" if not session.get("just_reversed", False) else "turn (direction reversed)!"
-        item_text = f"**{emoji} {picker.mention}'s {turn_text}**\n\nChoose items below..."
+        item_text = f"**{emoji} {picker.mention}'s {turn_text}**\n\nChoose item(s) below:"
 
         view = ItemDropdownView(session_id)
 
