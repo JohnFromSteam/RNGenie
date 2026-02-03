@@ -467,7 +467,7 @@ class ItemDropdownView(nextcord.ui.View):
     def _populate(self):
         """
         Build Select options and Buttons based on current session state.
-        Uses session["selected_items"] to mark previously selected options as default.
+        Fixes the '25+ items' crash by dynamically assigning Action Rows.
         """
         self.clear_items()
         session = loot_sessions.get(self.session_id)
@@ -482,48 +482,61 @@ class ItemDropdownView(nextcord.ui.View):
         if not available:
             return
 
-        # split into 25-option chunks to respect Discord limit
+        # 1. Add Dropdowns (1 row per dropdown)
         chunks = [available[i:i+25] for i in range(0, len(available), 25)]
         selected = set(session.get("selected_items") or [])
-        for ci, chunk in enumerate(chunks):
+        
+        # Safety: Discord only allows 5 rows. We need 2 for buttons, so max 3 for dropdowns.
+        dropdown_count = min(len(chunks), 3) 
+        
+        for ci in range(dropdown_count):
+            chunk = chunks[ci]
             opts = []
             for idx, item in chunk:
                 label = f"{item['display_number']}. {item['name']}"
                 truncated = (label[:97] + "...") if len(label) > 100 else label
-                default = str(idx) in selected
-                opts.append(nextcord.SelectOption(label=truncated, value=str(idx), default=default))
-            placeholder = "Choose item(s)" if len(chunks) == 1 else f"Choose item(s) ({chunk[0][1]['display_number']}-{chunk[-1][1]['display_number']})..."
-            self.add_item(nextcord.ui.Select(placeholder=placeholder, options=opts, custom_id=f"item_select_{ci}", min_values=0, max_values=len(opts)))
+                is_selected = str(idx) in selected
+                opts.append(nextcord.SelectOption(label=truncated, value=str(idx), default=is_selected))
+            
+            placeholder = "Choose item(s)..." if dropdown_count == 1 else f"Items {chunk[0][1]['display_number']} - {chunk[-1][1]['display_number']}"
+            
+            # Dropdowns are added to Rows 0, 1, etc.
+            self.add_item(nextcord.ui.Select(
+                placeholder=placeholder, 
+                options=opts, 
+                custom_id=f"item_select_{ci}", 
+                min_values=0, 
+                max_values=len(opts),
+                row=ci
+            ))
 
-        # Row 1: Assign, Skip, Undo
+        # 2. Dynamic Button Positioning
+        # Start buttons on the row immediately following the last dropdown
+        btn_row_1 = dropdown_count
+        btn_row_2 = dropdown_count + 1
+
+        # Row 1 Buttons: Assign, Skip, Skip Remaining
         assign_disabled = not session.get("selected_items")
-        self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.success, emoji="✅", custom_id="assign_button", disabled=assign_disabled, row=1))
-        self.add_item(nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button", row=1))
+        self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.success, emoji="✅", custom_id="assign_button", disabled=assign_disabled, row=btn_row_1))
+        self.add_item(nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button", row=btn_row_1))
+        self.add_item(nextcord.ui.Button(label="Skip Remaining", style=nextcord.ButtonStyle.danger, custom_id="skip_remaining_button", row=btn_row_1))
         
-        # New Button: Skip On Remaining Loot
-        self.add_item(nextcord.ui.Button(label="Skip On Remaining Loot", style=nextcord.ButtonStyle.danger, custom_id="skip_remaining_button", row=1))
-        
+        # Row 2 Buttons: Undo, Add Item
         undo_disabled = not session.get("last_action")
-        self.add_item(nextcord.ui.Button(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=undo_disabled, row=1))
+        self.add_item(nextcord.ui.Button(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=undo_disabled, row=btn_row_2))
+        self.add_item(nextcord.ui.Button(label="Add Item", style=nextcord.ButtonStyle.primary, emoji="➕", custom_id="add_item_button", row=btn_row_2))
 
-        # Row 2: Add Item (Loot Master only)
-        self.add_item(nextcord.ui.Button(label="Add Item", style=nextcord.ButtonStyle.primary, emoji="➕", custom_id="add_item_button", row=2))
-
-        # wire callbacks for each element
+        # 3. Wire Callbacks
         for child in self.children:
-            if getattr(child, "custom_id", None) == "assign_button":
-                child.callback = self.on_assign
-            if getattr(child, "custom_id", None) == "skip_button":
-                child.callback = self.on_skip
-            if getattr(child, "custom_id", None) == "skip_remaining_button":
-                child.callback = self.on_skip_remaining
-            if getattr(child, "custom_id", None) == "undo_button":
-                child.callback = self.on_undo
-            if getattr(child, "custom_id", None) == "add_item_button":
-                child.callback = self.on_add_item
-            if getattr(child, "custom_id", "").startswith("item_select_"):
+            if isinstance(child, nextcord.ui.Button):
+                if child.custom_id == "assign_button": child.callback = self.on_assign
+                elif child.custom_id == "skip_button": child.callback = self.on_skip
+                elif child.custom_id == "skip_remaining_button": child.callback = self.on_skip_remaining
+                elif child.custom_id == "undo_button": child.callback = self.on_undo
+                elif child.custom_id == "add_item_button": child.callback = self.on_add_item
+            elif isinstance(child, nextcord.ui.Select):
                 child.callback = self.on_item_select
-
+                
     async def _fast_edit(self, interaction: nextcord.Interaction, content: str, view: nextcord.ui.View | None) -> bool:
         """
         Attempt quick edit via interaction.response.edit_message; fallback to fetching & editing
