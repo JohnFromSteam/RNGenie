@@ -52,44 +52,117 @@ def _are_items_left(session: dict) -> bool:
 
 def _advance_turn_snake(session: dict) -> None:
     """
-    Advance the current_turn index using snake draft logic.
+    Advance the current_turn index using snake draft logic, respecting 'skipped' status.
     If the end is reached, reverse direction and increment the round.
-    If no items remain, mark the session as complete by setting current_turn
-    beyond the last index (uses len(session['rolls'])).
+    If no items remain or all users skipped, mark session complete.
     """
     session["just_reversed"] = False
     if not _are_items_left(session):
         session["current_turn"] = len(session["rolls"])
         return
 
-    num = len(session["rolls"])
+    rolls = session["rolls"]
+    num = len(rolls)
     if num == 0:
         return
-    if session["current_turn"] == TURN_NOT_STARTED:
-        session["current_turn"] = 0
+
+    # Check if anyone is active (not skipped)
+    if all(r.get("skipped") for r in rolls):
+        session["current_turn"] = num
         return
 
-    next_turn = session["current_turn"] + session["direction"]
-    if 0 <= next_turn < num:
-        session["current_turn"] = next_turn
-    else:
-        # reverse direction and step once in the new direction
-        session["direction"] *= -1
-        session["round"] += 1
-        session["just_reversed"] = True
-        # if there's only one roller, ensure index stays valid
-        if num == 1:
-            session["current_turn"] = 0
+    if session["current_turn"] == TURN_NOT_STARTED:
+        # Start at the first non-skipped user
+        for i in range(num):
+            if not rolls[i].get("skipped"):
+                session["current_turn"] = i
+                return
+        # Fallback if everyone is skipped (caught by all() check above usually)
+        session["current_turn"] = num
+        return
 
-def _build_roll_lines(rolls: list) -> str:
+    curr = session["current_turn"]
+    direction = session["direction"]
+    
+    # We need to find the next active user. 
+    # Simulate the snake walk until a non-skipped user is found or we exhaust reasonable attempts.
+    # Limit iterations to avoid infinite loops.
+    for _ in range(num * 4):
+        next_idx = curr + direction
+        
+        if 0 <= next_idx < num:
+            curr = next_idx
+            # If user is not skipped, they are the next turn
+            if not rolls[curr].get("skipped"):
+                session["current_turn"] = curr
+                session["direction"] = direction
+                return
+            # If skipped, loop continues with updated curr in same direction
+        else:
+            # Reverse direction
+            direction *= -1
+            session["round"] += 1
+            session["just_reversed"] = True
+            session["direction"] = direction
+            
+            # In snake draft, hitting the edge often means the edge player goes again (or first in next round).
+            # Check the edge player (curr) again with the new direction logic implications.
+            # If the edge player is not skipped, they take the turn.
+            if not rolls[curr].get("skipped"):
+                session["current_turn"] = curr
+                return
+            # If edge is skipped, next iteration will apply new direction from curr
+            
+    # If we fall through, assume done
+    session["current_turn"] = num
+
+def _get_next_active_index(session: dict) -> int:
     """
-    Build the text block that shows roll order and any tie-break values.
+    Determine the index of the *next* player who will take a turn, without modifying session state.
+    Returns -1 if no next player exists.
+    """
+    if not _are_items_left(session):
+        return -1
+    rolls = session["rolls"]
+    num = len(rolls)
+    if num == 0:
+        return -1
+    if session["current_turn"] < 0 or session["current_turn"] >= num:
+        return -1
+
+    curr = session["current_turn"]
+    direction = session["direction"]
+    
+    # Simulate one successful 'advance' step
+    for _ in range(num * 4):
+        next_idx = curr + direction
+        if 0 <= next_idx < num:
+            curr = next_idx
+            if not rolls[curr].get("skipped"):
+                return curr
+        else:
+            direction *= -1
+            if not rolls[curr].get("skipped"):
+                return curr
+            
+    return -1
+
+def _build_roll_lines(session: dict) -> str:
+    """
+    Build the text block that shows roll order, tie-breaks, and status emojis.
     Returns a newline-separated string suitable for insertion into an ANSI code block.
     """
+    rolls = session["rolls"]
     roll_counts = {}
     for r in rolls:
         roll_counts.setdefault(r["roll"], 0)
         roll_counts[r["roll"]] += 1
+    
+    current_idx = session["current_turn"]
+    # Only calculate next if session is active
+    is_active = (0 <= current_idx < len(rolls)) and _are_items_left(session)
+    next_idx = _get_next_active_index(session) if is_active else -1
+    
     parts = []
     for idx, r in enumerate(rolls):
         emoji = NUMBER_EMOJIS.get(idx + 1, f"#{idx+1}")
@@ -98,7 +171,23 @@ def _build_roll_lines(rolls: list) -> str:
         if roll_counts.get(r["roll"], 0) > 1:
             tb = r.get("tiebreak")
             base += f" /TB:{tb if tb is not None else '—'}"
-        parts.append(base)
+        
+        # Add status emoji
+        status = ""
+        if r.get("skipped"):
+            # User has opted out of remaining loot.
+            # No specific emoji requested for skipped, but we shouldn't show active ones.
+            # We can leave blank or add a symbol. Let's leave blank to avoid clutter, or use a distinctive one.
+            pass 
+        elif is_active:
+            if idx == current_idx:
+                status = " ▶️"
+            elif idx == next_idx:
+                status = " 🔜"
+            else:
+                status = " ⏳"
+        
+        parts.append(base + status)
     return "\n".join(parts)
 
 async def _get_msg(channel: nextcord.abc.GuildChannel | nextcord.TextChannel | None, msg_id: int):
@@ -185,15 +274,20 @@ def build_control_panel_message(session: dict) -> str:
         "```ansi\n"
         f"{YELLOW}{BOLD}🎲 Roll Order 🎲{RESET}\n"
         "==================================\n"
-        f"{_build_roll_lines(session['rolls'])}\n"
+        f"{_build_roll_lines(session)}\n"
         "```"
     )
 
+    # Collect assigned items and sort them by the order they were assigned
+    # This ensures new items added to a person's list appear at the end.
+    assigned_items = [it for it in session["items"] if it["assigned_to"]]
+    assigned_items.sort(key=lambda x: x.get("assigned_order", 0))
+
     # Map member id -> list of assigned item names for display
     assigned_map = {r["member"].id: [] for r in session["rolls"]}
-    for it in session["items"]:
-        if it["assigned_to"]:
-            assigned_map.setdefault(it["assigned_to"], []).append(it["name"])
+    for it in assigned_items:
+        assigned_map.setdefault(it["assigned_to"], []).append(it["name"])
+
     assigned_block = (
         "```ansi\n"
         f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}\n"
@@ -239,14 +333,18 @@ def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
         "```ansi\n"
         f"{YELLOW}{BOLD}🎲 Roll Order 🎲{RESET}\n"
         "==================================\n"
-        f"{_build_roll_lines(session['rolls'])}\n"
+        f"{_build_roll_lines(session)}\n"
         "```"
     )
 
+    # Sort items by assignment order
+    assigned_items = [it for it in session["items"] if it["assigned_to"]]
+    assigned_items.sort(key=lambda x: x.get("assigned_order", 0))
+
     assigned_map = {r["member"].id: [] for r in session["rolls"]}
-    for it in session["items"]:
-        if it["assigned_to"]:
-            assigned_map.setdefault(it["assigned_to"], []).append(it["name"])
+    for it in assigned_items:
+        assigned_map.setdefault(it["assigned_to"], []).append(it["name"])
+
     assigned_block = (
         "```ansi\n"
         f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}\n"
@@ -290,9 +388,72 @@ def _item_message_text_and_active(session: dict) -> tuple[str, bool]:
     picker = session["rolls"][session["current_turn"]]["member"]
     emoji = NUMBER_EMOJIS.get(session["current_turn"] + 1, "👉")
     turn_text = "turn!" if not session.get("just_reversed", False) else "turn (direction reversed)!"
-    return (f"**{emoji} {picker.mention}'s {turn_text}**\n\nChoose items below...", True)
+    return (f"**{emoji} {picker.mention}'s {turn_text}**\n\nChoose item(s) below:", True)
 
-# ---------- UI Views: Item dropdown view and Control panel view ----------
+# ---------- UI Views: Item dropdown view, Add Item Modal, and Control panel view ----------
+
+class AddItemModal(nextcord.ui.Modal):
+    """
+    Modal for the Loot Master to add a new item dynamically during distribution.
+    """
+    def __init__(self, session_id: int):
+        super().__init__("Add Loot Item")
+        self.session_id = session_id
+        self.item_input = nextcord.ui.TextInput(
+            label="Item Name (supports '2x Item' syntax)",
+            placeholder="e.g. 1x Mysterious Orb",
+            required=True,
+            style=nextcord.TextInputStyle.short,
+            max_length=100
+        )
+        self.add_item(self.item_input)
+
+    async def callback(self, interaction: nextcord.Interaction):
+        session = loot_sessions.get(self.session_id)
+        if not session:
+            await interaction.response.send_message("Session expired.", ephemeral=True)
+            return
+
+        # Parse input
+        s = self.item_input.value.strip()
+        names = []
+        if s:
+            m = re.match(r"(\d+)[xX]\s*(.*)", s)
+            if m:
+                try:
+                    c = int(m.group(1))
+                    nm = m.group(2).strip()
+                    if nm:
+                        names.extend([nm] * c)
+                    else:
+                        names.append(s)
+                except Exception:
+                    names.append(s)
+            else:
+                names.append(s)
+        
+        if not names:
+            await interaction.response.send_message("Invalid item name.", ephemeral=True)
+            return
+
+        # Determine next display number
+        current_max = 0
+        for it in session["items"]:
+            try:
+                if it["display_number"] > current_max:
+                    current_max = it["display_number"]
+            except:
+                pass
+        
+        new_items = [{"name": n, "assigned_to": None, "display_number": current_max + i + 1} for i, n in enumerate(names)]
+        session["items"].extend(new_items)
+        
+        await _reset_session_timeout(self.session_id)
+        # We need to refresh the views. 
+        # Sending a response is required to close the modal cleanly.
+        await interaction.response.defer(ephemeral=True)
+        _schedule_refresh(self.session_id, delete_item=True)
+
 class ItemDropdownView(nextcord.ui.View):
     """
     Dropdown view that shows all currently available items for the active picker.
@@ -306,7 +467,7 @@ class ItemDropdownView(nextcord.ui.View):
     def _populate(self):
         """
         Build Select options and Buttons based on current session state.
-        Uses session["selected_items"] to mark previously selected options as default.
+        Fixes the '25+ items' crash by dynamically assigning Action Rows.
         """
         self.clear_items()
         session = loot_sessions.get(self.session_id)
@@ -321,37 +482,61 @@ class ItemDropdownView(nextcord.ui.View):
         if not available:
             return
 
-        # split into 25-option chunks to respect Discord limit
+        # 1. Add Dropdowns (1 row per dropdown)
         chunks = [available[i:i+25] for i in range(0, len(available), 25)]
         selected = set(session.get("selected_items") or [])
-        for ci, chunk in enumerate(chunks):
+        
+        # Safety: Discord only allows 5 rows. We need 2 for buttons, so max 3 for dropdowns.
+        dropdown_count = min(len(chunks), 3) 
+        
+        for ci in range(dropdown_count):
+            chunk = chunks[ci]
             opts = []
             for idx, item in chunk:
                 label = f"{item['display_number']}. {item['name']}"
                 truncated = (label[:97] + "...") if len(label) > 100 else label
-                default = str(idx) in selected
-                opts.append(nextcord.SelectOption(label=truncated, value=str(idx), default=default))
-            placeholder = "Choose items..." if len(chunks) == 1 else f"Choose items ({chunk[0][1]['display_number']}-{chunk[-1][1]['display_number']})..."
-            self.add_item(nextcord.ui.Select(placeholder=placeholder, options=opts, custom_id=f"item_select_{ci}", min_values=0, max_values=len(opts)))
+                is_selected = str(idx) in selected
+                opts.append(nextcord.SelectOption(label=truncated, value=str(idx), default=is_selected))
+            
+            placeholder = "Choose item(s)..." if dropdown_count == 1 else f"Items {chunk[0][1]['display_number']} - {chunk[-1][1]['display_number']}"
+            
+            # Dropdowns are added to Rows 0, 1, etc.
+            self.add_item(nextcord.ui.Select(
+                placeholder=placeholder, 
+                options=opts, 
+                custom_id=f"item_select_{ci}", 
+                min_values=0, 
+                max_values=len(opts),
+                row=ci
+            ))
 
-        # Buttons: Assign Selected (enabled only if something selected), Skip Turn, Undo (if available)
+        # 2. Dynamic Button Positioning
+        # Start buttons on the row immediately following the last dropdown
+        btn_row_1 = dropdown_count
+        btn_row_2 = dropdown_count + 1
+
+        # Row 1 Buttons: Assign, Skip, Skip Remaining
         assign_disabled = not session.get("selected_items")
-        self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.success, emoji="✅", custom_id="assign_button", disabled=assign_disabled))
-        self.add_item(nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button"))
+        self.add_item(nextcord.ui.Button(label="Assign Selected", style=nextcord.ButtonStyle.success, emoji="✅", custom_id="assign_button", disabled=assign_disabled, row=btn_row_1))
+        self.add_item(nextcord.ui.Button(label="Skip Turn", style=nextcord.ButtonStyle.danger, custom_id="skip_button", row=btn_row_1))
+        self.add_item(nextcord.ui.Button(label="Skip Remaining", style=nextcord.ButtonStyle.danger, custom_id="skip_remaining_button", row=btn_row_1))
+        
+        # Row 2 Buttons: Undo, Add Item
         undo_disabled = not session.get("last_action")
-        self.add_item(nextcord.ui.Button(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=undo_disabled))
+        self.add_item(nextcord.ui.Button(label="Undo", style=nextcord.ButtonStyle.secondary, emoji="↩️", custom_id="undo_button", disabled=undo_disabled, row=btn_row_2))
+        self.add_item(nextcord.ui.Button(label="Add Item", style=nextcord.ButtonStyle.primary, emoji="➕", custom_id="add_item_button", row=btn_row_2))
 
-        # wire callbacks for each element
+        # 3. Wire Callbacks
         for child in self.children:
-            if getattr(child, "custom_id", None) == "assign_button":
-                child.callback = self.on_assign
-            if getattr(child, "custom_id", None) == "skip_button":
-                child.callback = self.on_skip
-            if getattr(child, "custom_id", None) == "undo_button":
-                child.callback = self.on_undo
-            if getattr(child, "custom_id", "").startswith("item_select_"):
+            if isinstance(child, nextcord.ui.Button):
+                if child.custom_id == "assign_button": child.callback = self.on_assign
+                elif child.custom_id == "skip_button": child.callback = self.on_skip
+                elif child.custom_id == "skip_remaining_button": child.callback = self.on_skip_remaining
+                elif child.custom_id == "undo_button": child.callback = self.on_undo
+                elif child.custom_id == "add_item_button": child.callback = self.on_add_item
+            elif isinstance(child, nextcord.ui.Select):
                 child.callback = self.on_item_select
-
+                
     async def _fast_edit(self, interaction: nextcord.Interaction, content: str, view: nextcord.ui.View | None) -> bool:
         """
         Attempt quick edit via interaction.response.edit_message; fallback to fetching & editing
@@ -503,6 +688,7 @@ class ItemDropdownView(nextcord.ui.View):
             "assigned_indices": [int(i) for i in selected] if selected else []
         }
 
+        # Apply assignment and assignment order
         for s in selected:
             try:
                 idx = int(s)
@@ -510,6 +696,8 @@ class ItemDropdownView(nextcord.ui.View):
                 continue
             if 0 <= idx < len(session["items"]):
                 session["items"][idx]["assigned_to"] = picker.id
+                session["items"][idx]["assigned_order"] = session["assignment_counter"]
+                session["assignment_counter"] += 1
 
         session["selected_items"] = None
         _advance_turn_snake(session)
@@ -567,6 +755,59 @@ class ItemDropdownView(nextcord.ui.View):
         await self._fast_edit(interaction, new_text, new_view)
         _schedule_refresh(self.session_id, delete_item=True)
 
+    async def on_skip_remaining(self, interaction: nextcord.Interaction):
+        """
+        Marks the current picker as 'skipped' for the rest of the distribution.
+        They remain in the lists but are skipped in turn order.
+        Allowed for: Current picker or Loot Master.
+        """
+        session = loot_sessions.get(self.session_id)
+        if not session:
+            try:
+                await interaction.response.send_message("Session expired.", ephemeral=True)
+            except: pass
+            return
+
+        if not (0 <= session["current_turn"] < len(session["rolls"])):
+            try:
+                await interaction.response.send_message("No active turn.", ephemeral=True)
+            except: pass
+            return
+
+        current_roller = session["rolls"][session["current_turn"]]
+        picker_member = current_roller["member"]
+        
+        # Permission check
+        if interaction.user.id not in (picker_member.id, session["invoker_id"]):
+             try:
+                await interaction.response.send_message("🛡️ Only the current picker or the Loot Manager can use this.", ephemeral=True)
+             except: pass
+             return
+
+        # Snapshot for undo
+        session["last_action"] = {
+            "turn": session["current_turn"],
+            "round": session["round"],
+            "direction": session["direction"],
+            "just_reversed": session.get("just_reversed", False),
+            "assigned_indices": [],
+            "skipped_turn_action": True # Marker to identify this specific type of skip action for undo
+        }
+
+        # Mark the user as skipped in the rolls list
+        session["rolls"][session["current_turn"]]["skipped"] = True
+
+        session["selected_items"] = None
+        
+        _advance_turn_snake(session)
+        await _reset_session_timeout(self.session_id)
+        
+        # Force refresh
+        try:
+            await interaction.response.defer()
+        except: pass
+        _schedule_refresh(self.session_id, delete_item=True)
+
     async def on_undo(self, interaction: nextcord.Interaction):
         """
         Undo the last assign/skip action. Only the Loot Manager (invoker) can undo.
@@ -598,11 +839,20 @@ class ItemDropdownView(nextcord.ui.View):
         for idx in last.get("assigned_indices", []):
             if 0 <= idx < len(session["items"]):
                 session["items"][idx]["assigned_to"] = None
+                # Clear order to keep data clean, though re-assigning will overwrite it
+                session["items"][idx]["assigned_order"] = -1
 
+        # Restore turn state
         session["current_turn"] = last["turn"]
         session["round"] = last["round"]
         session["direction"] = last["direction"]
         session["just_reversed"] = last.get("just_reversed", False)
+        
+        # If the last action was "Skip Remaining", unmark the skipped status
+        if last.get("skipped_turn_action"):
+             if 0 <= last["turn"] < len(session["rolls"]):
+                 session["rolls"][last["turn"]]["skipped"] = False
+
         session["last_action"] = None
         session["selected_items"] = None
 
@@ -611,6 +861,25 @@ class ItemDropdownView(nextcord.ui.View):
         new_view = ItemDropdownView(self.session_id) if active else None
         await self._fast_edit(interaction, new_text, new_view)
         _schedule_refresh(self.session_id, delete_item=True)
+
+    async def on_add_item(self, interaction: nextcord.Interaction):
+        """
+        Open the modal to add an item. Only for Loot Master.
+        """
+        session = loot_sessions.get(self.session_id)
+        if not session:
+            try:
+                 await interaction.response.send_message("Session expired.", ephemeral=True)
+            except: pass
+            return
+
+        if interaction.user.id != session["invoker_id"]:
+            try:
+                await interaction.response.send_message("🛡️ Only the Loot Manager can add items.", ephemeral=True)
+            except: pass
+            return
+            
+        await interaction.response.send_modal(AddItemModal(self.session_id))
 
 class ControlPanelView(nextcord.ui.View):
     """
@@ -912,11 +1181,18 @@ class FinalizeView(nextcord.ui.View):
         for idx in last.get("assigned_indices", []):
             if 0 <= idx < len(session["items"]):
                 session["items"][idx]["assigned_to"] = None
+                session["items"][idx]["assigned_order"] = -1
 
         session["current_turn"] = last["turn"]
         session["round"] = last["round"]
         session["direction"] = last["direction"]
         session["just_reversed"] = last.get("just_reversed", False)
+        
+        # Undo skipped status if applicable
+        if last.get("skipped_turn_action"):
+             if 0 <= last["turn"] < len(session["rolls"]):
+                 session["rolls"][last["turn"]]["skipped"] = False
+
         session["last_action"] = None
         session["selected_items"] = None
 
@@ -1027,7 +1303,7 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             # present the finalize message to the invoker (third message) with FinalizeView
             finalize_text = f"✍️ {session['invoker'].mention}\n\nClick an action below to finish or undo the last assignment."
             finalize_view = FinalizeView(session_id)
-            
+
             # delete any existing item message (we'll replace it with finalize)
             if existing_item_msg:
                 try:
@@ -1084,7 +1360,7 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
         picker = session["rolls"][session["current_turn"]]["member"]
         emoji = NUMBER_EMOJIS.get(session["current_turn"] + 1, "👉")
         turn_text = "turn!" if not session.get("just_reversed", False) else "turn (direction reversed)!"
-        item_text = f"**{emoji} {picker.mention}'s {turn_text}**\n\nChoose items below..."
+        item_text = f"**{emoji} {picker.mention}'s {turn_text}**\n\nChoose item(s) below:"
 
         view = ItemDropdownView(session_id)
 
@@ -1285,7 +1561,8 @@ class LootModal(nextcord.ui.Modal):
             "last_action": None,
             "last_control_content": None,
             "last_loot_content": None,
-            "timeout_task": None
+            "timeout_task": None,
+            "assignment_counter": 0
         }
         loot_sessions[session_id] = session
         await _reset_session_timeout(session_id)
