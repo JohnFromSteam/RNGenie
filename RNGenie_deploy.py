@@ -52,44 +52,117 @@ def _are_items_left(session: dict) -> bool:
 
 def _advance_turn_snake(session: dict) -> None:
     """
-    Advance the current_turn index using snake draft logic.
+    Advance the current_turn index using snake draft logic, respecting 'skipped' status.
     If the end is reached, reverse direction and increment the round.
-    If no items remain, mark the session as complete by setting current_turn
-    beyond the last index (uses len(session['rolls'])).
+    If no items remain or all users skipped, mark session complete.
     """
     session["just_reversed"] = False
     if not _are_items_left(session):
         session["current_turn"] = len(session["rolls"])
         return
 
-    num = len(session["rolls"])
+    rolls = session["rolls"]
+    num = len(rolls)
     if num == 0:
         return
-    if session["current_turn"] == TURN_NOT_STARTED:
-        session["current_turn"] = 0
+
+    # Check if anyone is active (not skipped)
+    if all(r.get("skipped") for r in rolls):
+        session["current_turn"] = num
         return
 
-    next_turn = session["current_turn"] + session["direction"]
-    if 0 <= next_turn < num:
-        session["current_turn"] = next_turn
-    else:
-        # reverse direction and step once in the new direction
-        session["direction"] *= -1
-        session["round"] += 1
-        session["just_reversed"] = True
-        # if there's only one roller, ensure index stays valid
-        if num == 1:
-            session["current_turn"] = 0
+    if session["current_turn"] == TURN_NOT_STARTED:
+        # Start at the first non-skipped user
+        for i in range(num):
+            if not rolls[i].get("skipped"):
+                session["current_turn"] = i
+                return
+        # Fallback if everyone is skipped (caught by all() check above usually)
+        session["current_turn"] = num
+        return
 
-def _build_roll_lines(rolls: list) -> str:
+    curr = session["current_turn"]
+    direction = session["direction"]
+    
+    # We need to find the next active user. 
+    # Simulate the snake walk until a non-skipped user is found or we exhaust reasonable attempts.
+    # Limit iterations to avoid infinite loops.
+    for _ in range(num * 4):
+        next_idx = curr + direction
+        
+        if 0 <= next_idx < num:
+            curr = next_idx
+            # If user is not skipped, they are the next turn
+            if not rolls[curr].get("skipped"):
+                session["current_turn"] = curr
+                session["direction"] = direction
+                return
+            # If skipped, loop continues with updated curr in same direction
+        else:
+            # Reverse direction
+            direction *= -1
+            session["round"] += 1
+            session["just_reversed"] = True
+            session["direction"] = direction
+            
+            # In snake draft, hitting the edge often means the edge player goes again (or first in next round).
+            # Check the edge player (curr) again with the new direction logic implications.
+            # If the edge player is not skipped, they take the turn.
+            if not rolls[curr].get("skipped"):
+                session["current_turn"] = curr
+                return
+            # If edge is skipped, next iteration will apply new direction from curr
+            
+    # If we fall through, assume done
+    session["current_turn"] = num
+
+def _get_next_active_index(session: dict) -> int:
     """
-    Build the text block that shows roll order and any tie-break values.
+    Determine the index of the *next* player who will take a turn, without modifying session state.
+    Returns -1 if no next player exists.
+    """
+    if not _are_items_left(session):
+        return -1
+    rolls = session["rolls"]
+    num = len(rolls)
+    if num == 0:
+        return -1
+    if session["current_turn"] < 0 or session["current_turn"] >= num:
+        return -1
+
+    curr = session["current_turn"]
+    direction = session["direction"]
+    
+    # Simulate one successful 'advance' step
+    for _ in range(num * 4):
+        next_idx = curr + direction
+        if 0 <= next_idx < num:
+            curr = next_idx
+            if not rolls[curr].get("skipped"):
+                return curr
+        else:
+            direction *= -1
+            if not rolls[curr].get("skipped"):
+                return curr
+            
+    return -1
+
+def _build_roll_lines(session: dict) -> str:
+    """
+    Build the text block that shows roll order, tie-breaks, and status emojis.
     Returns a newline-separated string suitable for insertion into an ANSI code block.
     """
+    rolls = session["rolls"]
     roll_counts = {}
     for r in rolls:
         roll_counts.setdefault(r["roll"], 0)
         roll_counts[r["roll"]] += 1
+    
+    current_idx = session["current_turn"]
+    # Only calculate next if session is active
+    is_active = (0 <= current_idx < len(rolls)) and _are_items_left(session)
+    next_idx = _get_next_active_index(session) if is_active else -1
+    
     parts = []
     for idx, r in enumerate(rolls):
         emoji = NUMBER_EMOJIS.get(idx + 1, f"#{idx+1}")
@@ -98,7 +171,23 @@ def _build_roll_lines(rolls: list) -> str:
         if roll_counts.get(r["roll"], 0) > 1:
             tb = r.get("tiebreak")
             base += f" /TB:{tb if tb is not None else '—'}"
-        parts.append(base)
+        
+        # Add status emoji
+        status = ""
+        if r.get("skipped"):
+            # User has opted out of remaining loot.
+            # No specific emoji requested for skipped, but we shouldn't show active ones.
+            # We can leave blank or add a symbol. Let's leave blank to avoid clutter, or use a distinctive one.
+            pass 
+        elif is_active:
+            if idx == current_idx:
+                status = " ▶️"
+            elif idx == next_idx:
+                status = " 🔜"
+            else:
+                status = " ⏳"
+        
+        parts.append(base + status)
     return "\n".join(parts)
 
 async def _get_msg(channel: nextcord.abc.GuildChannel | nextcord.TextChannel | None, msg_id: int):
@@ -185,7 +274,7 @@ def build_control_panel_message(session: dict) -> str:
         "```ansi\n"
         f"{YELLOW}{BOLD}🎲 Roll Order 🎲{RESET}\n"
         "==================================\n"
-        f"{_build_roll_lines(session['rolls'])}\n"
+        f"{_build_roll_lines(session)}\n"
         "```"
     )
 
@@ -244,7 +333,7 @@ def build_final_summary_message(session: dict, timed_out: bool=False) -> str:
         "```ansi\n"
         f"{YELLOW}{BOLD}🎲 Roll Order 🎲{RESET}\n"
         "==================================\n"
-        f"{_build_roll_lines(session['rolls'])}\n"
+        f"{_build_roll_lines(session)}\n"
         "```"
     )
 
@@ -655,7 +744,8 @@ class ItemDropdownView(nextcord.ui.View):
 
     async def on_skip_remaining(self, interaction: nextcord.Interaction):
         """
-        Removes the current picker from the rotation for the rest of the distribution.
+        Marks the current picker as 'skipped' for the rest of the distribution.
+        They remain in the lists but are skipped in turn order.
         Allowed for: Current picker or Loot Master.
         """
         session = loot_sessions.get(self.session_id)
@@ -681,27 +771,22 @@ class ItemDropdownView(nextcord.ui.View):
              except: pass
              return
 
-        # Snapshot for undo isn't perfectly supported for 'Remove User' via this button, 
-        # but we do minimal tracking so standard undo doesn't crash, though it won't restore the user easily.
-        # (Standard undo logic simply restores items and index; restoring a deleted user is out of scope 
-        # for simple undo, so we clear last_action to prevent broken state).
-        session["last_action"] = None 
+        # Snapshot for undo
+        session["last_action"] = {
+            "turn": session["current_turn"],
+            "round": session["round"],
+            "direction": session["direction"],
+            "just_reversed": session.get("just_reversed", False),
+            "assigned_indices": [],
+            "skipped_turn_action": True # Marker to identify this specific type of skip action for undo
+        }
 
-        # Remove the user
-        session["rolls"].pop(session["current_turn"])
+        # Mark the user as skipped in the rolls list
+        session["rolls"][session["current_turn"]]["skipped"] = True
 
-        # Adjust current_turn index if necessary
-        # If we removed the last person in the list, index is now out of bounds
-        if session["current_turn"] >= len(session["rolls"]):
-             session["current_turn"] = max(0, len(session["rolls"]) - 1)
-        
-        # If the list is now empty
-        if not session["rolls"]:
-            # Cancel logic (simplified from on_remove_confirm)
-            session["current_turn"] = len(session["rolls"]) # mark done-ish
-            
         session["selected_items"] = None
         
+        _advance_turn_snake(session)
         await _reset_session_timeout(self.session_id)
         
         # Force refresh
@@ -744,10 +829,17 @@ class ItemDropdownView(nextcord.ui.View):
                 # Clear order to keep data clean, though re-assigning will overwrite it
                 session["items"][idx]["assigned_order"] = -1
 
+        # Restore turn state
         session["current_turn"] = last["turn"]
         session["round"] = last["round"]
         session["direction"] = last["direction"]
         session["just_reversed"] = last.get("just_reversed", False)
+        
+        # If the last action was "Skip Remaining", unmark the skipped status
+        if last.get("skipped_turn_action"):
+             if 0 <= last["turn"] < len(session["rolls"]):
+                 session["rolls"][last["turn"]]["skipped"] = False
+
         session["last_action"] = None
         session["selected_items"] = None
 
@@ -1082,6 +1174,12 @@ class FinalizeView(nextcord.ui.View):
         session["round"] = last["round"]
         session["direction"] = last["direction"]
         session["just_reversed"] = last.get("just_reversed", False)
+        
+        # Undo skipped status if applicable
+        if last.get("skipped_turn_action"):
+             if 0 <= last["turn"] < len(session["rolls"]):
+                 session["rolls"][last["turn"]]["skipped"] = False
+
         session["last_action"] = None
         session["selected_items"] = None
 
