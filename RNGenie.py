@@ -259,7 +259,9 @@ def _paginate_plain_sections(sections: list[str], limit: int = SAFE_CHUNK_LIMIT)
     """
     Greedily pack pre-built section strings (each itself a full ```ansi block or
     plain text block) into as few messages as possible, each under `limit` chars,
-    joined with a blank line. Never splits a section internally — if a single
+    joined with a single newline (not a blank line — code-block fences already get
+    visual padding from Discord's own rendering, so an extra blank line on top of
+    that reads as a doubled gap). Never splits a section internally — if a single
     section alone exceeds the limit, it is emitted on its own as an oversized chunk
     rather than being corrupted, since these sections are already safe-chunked
     upstream by _paginate_ansi_blocks.
@@ -270,9 +272,9 @@ def _paginate_plain_sections(sections: list[str], limit: int = SAFE_CHUNK_LIMIT)
 
     for sec in sections:
         sec_len = len(sec)
-        added_len = sec_len + (2 if current_parts else 0)  # "\n\n" join
+        added_len = sec_len + (1 if current_parts else 0)  # "\n" join
         if current_parts and (current_len + added_len) > limit:
-            messages.append("\n\n".join(current_parts))
+            messages.append("\n".join(current_parts))
             current_parts = [sec]
             current_len = sec_len
         else:
@@ -280,18 +282,106 @@ def _paginate_plain_sections(sections: list[str], limit: int = SAFE_CHUNK_LIMIT)
             current_len += added_len
 
     if current_parts:
-        messages.append("\n\n".join(current_parts))
+        messages.append("\n".join(current_parts))
     if not messages:
         messages.append("")
     return messages
 
+def _pack_lines_into_ansi_blocks(line_groups: list[list[str]], limit: int = SAFE_CHUNK_LIMIT,
+                                  leading_header_lines: list[str] | None = None) -> list[str]:
+    """
+    Pack multiple pre-built "groups" of lines (e.g. one group per player, where
+    each group's first line is a header like a name, followed by its item lines)
+    into as FEW ```ansi blocks as possible, separating groups with a single blank
+    line WITHIN the same code block instead of closing/reopening a fence per group.
+
+    This is what keeps consecutive players visually tight (one blank line) instead
+    of the large gap Discord renders around adjacent ```...``` fences.
+
+    If leading_header_lines is given, those lines are baked directly into the very
+    FIRST returned block (ahead of the first group, no blank-line gap after them,
+    just a normal line break) instead of being a separate section — this is what
+    keeps a section title like "✅ Assigned Items ✅" glued to the first player
+    instead of floating in its own fenced box.
+
+    Each returned string is a complete ```ansi ... ``` block, kept under `limit`
+    characters. If a single group is so large it can't fit even in an empty block,
+    it is split across multiple blocks (falling back to raw line packing) rather
+    than dropped.
+    """
+    fence_open = "```ansi\n"
+    fence_close = "```"
+    overhead = len(fence_open) + len(fence_close) + 1  # +1 for the trailing newline before fence_close
+
+    blocks: list[str] = []
+    current_lines: list[str] = list(leading_header_lines) if leading_header_lines else []
+    current_len = sum(len(l) + 1 for l in current_lines)
+    has_group_in_current = False  # tracks real groups placed, so a header alone doesn't force a blank line
+
+    def _flush():
+        nonlocal current_lines, current_len, has_group_in_current
+        if current_lines:
+            blocks.append(fence_open + "\n".join(current_lines) + "\n" + fence_close)
+        current_lines = []
+        current_len = 0
+        has_group_in_current = False
+
+    for gi, group in enumerate(line_groups):
+        if not group:
+            continue
+        group_text_len = sum(len(l) + 1 for l in group)  # +1 per newline
+        separator_len = 1 if has_group_in_current else 0  # blank line only between two groups, not after a bare header
+
+        # If the group fits in the current block, add it.
+        if current_lines and (current_len + separator_len + group_text_len + overhead) <= limit:
+            if has_group_in_current:
+                current_lines.append("")  # blank separator line, only between groups
+            current_lines.extend(group)
+            current_len += separator_len + group_text_len
+            has_group_in_current = True
+            continue
+
+        # If the group fits in a *fresh* block, flush and start a new one with it.
+        if group_text_len + overhead <= limit:
+            _flush()
+            current_lines = list(group)
+            current_len = group_text_len
+            has_group_in_current = True
+            continue
+
+        # The group itself is too large even alone — split it line by line.
+        _flush()
+        sub: list[str] = []
+        sub_len = 0
+        for line in group:
+            line_len = len(line) + 1
+            if sub and (sub_len + line_len + overhead) > limit:
+                blocks.append(fence_open + "\n".join(sub) + "\n" + fence_close)
+                sub = [line]
+                sub_len = line_len
+            else:
+                sub.append(line)
+                sub_len += line_len
+        if sub:
+            current_lines = sub
+            current_len = sub_len
+            has_group_in_current = True
+
+    _flush()
+    if not blocks:
+        blocks.append(fence_open + fence_close)
+    return blocks
+
 # ---------- Message builders (use ANSI for colored output) ----------
 def build_loot_list_messages(session: dict) -> list[str]:
     """
-    Build the 'loot list' message(s). Returns a LIST of message strings because
-    the remaining-items list can exceed Discord's 2000-char limit when there are
-    many items; in that case it is split across multiple messages instead of
-    being truncated.
+    Build the 'loot list' message body/bodies (NOT including any page-number label —
+    callers that assemble the full session message sequence apply unified numbering
+    across ALL session messages, since this list's page count depends on item count
+    and must be numbered relative to the control panel pages too).
+    Returns a LIST of message strings because the remaining-items list can exceed
+    Discord's 2000-char limit when there are many items; in that case it is split
+    across multiple messages instead of being truncated.
     """
     remaining = [it for it in session["items"] if it["assigned_to"] is None]
     if remaining:
@@ -306,13 +396,7 @@ def build_loot_list_messages(session: dict) -> list[str]:
             "All items have been distributed.\n"
             "```"
         ]
-
-    messages = []
-    total = len(blocks)
-    for i, block in enumerate(blocks):
-        page_note = f" ({i+1}/{total})" if total > 1 else ""
-        messages.append(f"**(1/2){page_note}**\n{block}")
-    return messages
+    return blocks
 
 def build_last_assigned_messages(session: dict) -> list[str]:
     """
@@ -340,12 +424,21 @@ def build_last_assigned_messages(session: dict) -> list[str]:
         messages.append(f"**(1/2){page_note}**\n{block}")
     return messages
 
-def _build_assigned_sections(session: dict) -> list[str]:
+def _build_assigned_sections(session: dict, section_header_lines: list[str] | None = None) -> list[str]:
     """
-    Build one ```ansi block PER PLAYER for the assigned-items list, each individually
-    paginated so a single player with a huge number of assigned items still can't
-    blow the 2000-char limit. Returns a list of complete ```ansi ... ``` blocks
-    (one or more per player) ready to be packed into messages.
+    Build the assigned-items list as one or more ```ansi blocks, packing AS MANY
+    players as possible into each block (separated by a single blank line) rather
+    than giving every player their own code fence. This is what removes the large
+    visual gaps between players that Discord renders around adjacent ``` fences.
+
+    If section_header_lines is given (e.g. the "✅ Assigned Items ✅" title +
+    divider), it's baked into the first returned block rather than becoming its
+    own separate fenced section — otherwise the title would float in its own box
+    with a gap before the first player, same problem as the player-to-player gaps.
+
+    Still safely overflows a single oversized player into its own block(s) if
+    needed. Returns a list of complete ```ansi ... ``` blocks ready to be packed
+    into messages.
     """
     assigned_items = [it for it in session["items"] if it["assigned_to"]]
     assigned_items.sort(key=lambda x: x.get("assigned_order", 0))
@@ -354,35 +447,28 @@ def _build_assigned_sections(session: dict) -> list[str]:
     for it in assigned_items:
         assigned_map.setdefault(it["assigned_to"], []).append(it["name"])
 
-    sections = []
+    line_groups: list[list[str]] = []
     for i, r in enumerate(session["rolls"]):
         emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        header = [f"{BLUE}{emoji} {r['member'].display_name}{RESET}"]
+        header_line = f"{BLUE}{emoji} {r['member'].display_name}{RESET}"
         items = assigned_map.get(r["member"].id, [])
-        lines = [f"- {nm}" for nm in items] if items else ["- N/A"]
-        # Each player's own block, safely chunked if absurdly long.
-        sections.extend(_paginate_ansi_blocks(header, lines))
-    return sections
+        item_lines = [f"- {nm}" for nm in items] if items else ["- N/A"]
+        line_groups.append([header_line] + item_lines)
+
+    return _pack_lines_into_ansi_blocks(line_groups, leading_header_lines=section_header_lines)
 
 def build_control_panel_messages(session: dict) -> list[str]:
     """
-    Build the control panel message(s) (2/2): roll order + assigned items + status.
-    Returns a LIST because assigned items across many players can exceed 2000 chars;
-    everything after the first message is sent as continuation pages.
+    Build the control panel message body/bodies: roll order + assigned items + status.
+    Returns a LIST (NOT including any page-number label — see build_loot_list_messages
+    for why numbering is applied later, across the whole session's messages).
     """
-    header = f"**(2/2)**\n\n✍️ **Loot Manager:** {session['invoker'].mention}\n\n"
-
     roll_header = [f"{YELLOW}{BOLD}🎲 Roll Order 🎲{RESET}", "=================================="]
     roll_lines = _build_roll_lines(session).split("\n") if session["rolls"] else []
     roll_blocks = _paginate_ansi_blocks(roll_header, roll_lines)
 
-    assigned_header_block = (
-        "```ansi\n"
-        f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}\n"
-        "==================================\n"
-        "```"
-    )
-    assigned_sections = _build_assigned_sections(session)
+    assigned_header_lines = [f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}", "=================================="]
+    assigned_sections = _build_assigned_sections(session, section_header_lines=assigned_header_lines)
 
     indicator = ""
     if 0 <= session["current_turn"] < len(session["rolls"]):
@@ -398,20 +484,17 @@ def build_control_panel_messages(session: dict) -> list[str]:
         except Exception:
             pass
 
-    # Pack: [header text] + roll_blocks + [assigned_header_block] + assigned_sections + [indicator]
-    # into as few messages as possible, respecting the limit.
-    all_sections = list(roll_blocks) + [assigned_header_block] + assigned_sections
+    # Pack: roll_blocks + assigned_sections (title baked into the first assigned
+    # block) into as few messages as possible.
+    all_sections = list(roll_blocks) + assigned_sections
     packed = _paginate_plain_sections(all_sections, limit=SAFE_CHUNK_LIMIT)
 
     messages = []
-    total = len(packed)
     for i, chunk in enumerate(packed):
         if i == 0:
-            page_note = f" ({i+1}/{total})" if total > 1 else ""
-            messages.append(f"**(2/2){page_note}**\n\n✍️ **Loot Manager:** {session['invoker'].mention}\n\n{chunk}")
+            messages.append(f"✍️ **Loot Manager:** {session['invoker'].mention}\n\n{chunk}")
         else:
-            page_note = f" ({i+1}/{total})"
-            messages.append(f"**(2/2){page_note}**\n{chunk}")
+            messages.append(chunk)
     # Indicator goes on the last page only.
     messages[-1] = messages[-1] + indicator
     return messages
@@ -428,13 +511,8 @@ def build_final_summary_messages(session: dict, timed_out: bool = False) -> list
     roll_lines = _build_roll_lines(session).split("\n") if session["rolls"] else []
     roll_blocks = _paginate_ansi_blocks(roll_header, roll_lines)
 
-    assigned_header_block = (
-        "```ansi\n"
-        f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}\n"
-        "==================================\n"
-        "```"
-    )
-    assigned_sections = _build_assigned_sections(session)
+    assigned_header_lines = [f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}", "=================================="]
+    assigned_sections = _build_assigned_sections(session, section_header_lines=assigned_header_lines)
 
     unclaimed = [it for it in session["items"] if it["assigned_to"] is None]
     unclaimed_blocks = []
@@ -443,7 +521,7 @@ def build_final_summary_messages(session: dict, timed_out: bool = False) -> list
         unclaimed_lines = [f"{RED}{it['display_number']}.{RESET} {it['name']}" for it in unclaimed]
         unclaimed_blocks = _paginate_ansi_blocks(unclaimed_header, unclaimed_lines)
 
-    all_sections = list(roll_blocks) + [assigned_header_block] + assigned_sections + unclaimed_blocks
+    all_sections = list(roll_blocks) + assigned_sections + unclaimed_blocks
     packed = _paginate_plain_sections(all_sections, limit=SAFE_CHUNK_LIMIT)
 
     messages = []
@@ -454,6 +532,14 @@ def build_final_summary_messages(session: dict, timed_out: bool = False) -> list
         else:
             messages.append(chunk)
     return messages
+
+# Discord hard-caps a View to 5 action rows; two rows are reserved for buttons
+# (Assign/Skip/Skip Remaining on one row, Undo/Add Item on the other), leaving 3
+# rows for item Select menus. Each Select holds at most 25 options, so at most
+# 75 items can be shown as choosable at once. Anything beyond that genuinely
+# can't fit in this UI shape — flagged in the picker message rather than silently
+# dropped, so the Loot Manager knows to use "Add Item" removal or split the pool.
+MAX_DROPDOWN_ITEMS = 75
 
 def _item_message_text_and_active(session: dict) -> tuple[str, bool]:
     """
@@ -467,7 +553,61 @@ def _item_message_text_and_active(session: dict) -> tuple[str, bool]:
     picker = session["rolls"][session["current_turn"]]["member"]
     emoji = NUMBER_EMOJIS.get(session["current_turn"] + 1, "👉")
     turn_text = "turn!" if not session.get("just_reversed", False) else "turn (direction reversed)!"
-    return (f"**{emoji} {picker.mention}'s {turn_text}**\n\nChoose item(s) below:", True)
+    text = f"**{emoji} {picker.mention}'s {turn_text}**\n\nChoose item(s) below:"
+
+    available_count = sum(1 for it in session["items"] if it["assigned_to"] is None)
+    if available_count > MAX_DROPDOWN_ITEMS:
+        hidden = available_count - MAX_DROPDOWN_ITEMS
+        text += (
+            f"\n\n⚠️ *Showing the first {MAX_DROPDOWN_ITEMS} items — "
+            f"{hidden} more are waiting and will appear once earlier items are assigned.*"
+        )
+    return (text, True)
+
+def _assemble_session_messages(loot_pages: list[str], control_pages: list[str]) -> tuple[list[str], list[str]]:
+    """
+    Combine the raw loot-list page bodies and raw control-panel page bodies into
+    their final, correctly-labeled text, with a SINGLE numbering scheme spanning
+    the whole session (not two independent "(1/2)"/"(2/2)" labels).
+
+    Channel order is: loot-list page(s) -> control panel page(s) -> item picker.
+    The control panel is kept second-to-last (immediately before the item picker)
+    because it holds the live roll order / assignments the picker needs in view,
+    so numbering runs loot pages first, then control pages.
+
+    Returns (labeled_loot_pages, labeled_control_pages) — same lengths as the
+    inputs, in the same relative order, just with the correct "(i/total)" label
+    applied to each.
+    """
+    total = len(loot_pages) + len(control_pages)
+
+    labeled_loot = []
+    for i, body in enumerate(loot_pages):
+        page_note = f" ({i+1}/{total})" if total > 1 else ""
+        labeled_loot.append(f"**(1/2){page_note}**\n{body}")
+
+    labeled_control = []
+    offset = len(loot_pages)
+    for i, body in enumerate(control_pages):
+        n = offset + i
+        page_note = f" ({n+1}/{total})" if total > 1 else ""
+        labeled_control.append(f"**(2/2){page_note}**\n\n{body}" if i == 0 else f"**(2/2){page_note}**\n{body}")
+
+    return labeled_loot, labeled_control
+
+def _is_ordered_after(later_ids: list[int], earlier_ids: list[int]) -> bool:
+    """
+    True if every id in `later_ids` was created after every id in `earlier_ids`.
+
+    Discord snowflake ids increase monotonically with creation time, so this is a
+    reliable way to check whether a group of messages currently sits *below*
+    another group in the channel. Messages can never be reordered in place, so
+    when this returns False the only way to restore the intended layout is to
+    delete and re-send the messages that need to move down.
+    """
+    if not later_ids or not earlier_ids:
+        return True
+    return min(later_ids) > max(earlier_ids)
 
 # ---------- Helper to sync a list of target messages against a list of desired contents ----------
 async def _sync_message_list(channel, existing_ids: list[int], desired_contents: list[str],
@@ -643,7 +783,8 @@ class ItemDropdownView(nextcord.ui.View):
         chunks = [available[i:i+25] for i in range(0, len(available), 25)]
         selected = set(session.get("selected_items") or [])
 
-        dropdown_count = min(len(chunks), 3)
+        max_dropdowns = MAX_DROPDOWN_ITEMS // 25  # 3 rows worth of Select menus (see MAX_DROPDOWN_ITEMS)
+        dropdown_count = min(len(chunks), max_dropdowns)
 
         for ci in range(dropdown_count):
             chunk = chunks[ci]
@@ -1413,10 +1554,20 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
         if not _are_items_left(session) and session["current_turn"] != TURN_NOT_STARTED:
             await _reset_session_timeout(session_id)
 
-            final_ctrl_pages = build_control_panel_messages(session)
+            raw_final_ctrl_pages = build_control_panel_messages(session)
+            _empty_loot, final_ctrl_pages = _assemble_session_messages([], raw_final_ctrl_pages)
             try:
                 new_ctrl_ids = await _sync_message_list(ch, ctrl_ids, final_ctrl_pages, views=None)
                 session["control_panel_message_ids"] = new_ctrl_ids
+            except Exception:
+                pass
+
+            # No remaining-items page is relevant once distribution is complete —
+            # remove any leftover loot-list pages from the channel.
+            try:
+                await _delete_message_list(ch, loot_ids)
+                session["loot_list_message_ids"] = []
+                session["loot_list_message_id"] = None
             except Exception:
                 pass
 
@@ -1440,23 +1591,38 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
 
             return
 
-        # Build current contents (each is now a LIST of pages) and sync.
-        loot_pages = build_loot_list_messages(session)
-        control_pages = build_control_panel_messages(session)
+        # Build current contents (each is now a LIST of raw page bodies) and apply
+        # unified numbering across both lists.
+        raw_loot_pages = build_loot_list_messages(session)
+        raw_control_pages = build_control_panel_messages(session)
+        loot_pages, control_pages = _assemble_session_messages(raw_loot_pages, raw_control_pages)
 
+        # Sync the loot list first (it occupies the topmost slots).
         try:
             new_loot_ids = await _sync_message_list(ch, loot_ids, loot_pages, views=None)
             session["loot_list_message_ids"] = new_loot_ids
             # Keep legacy single-id field pointing at the first page for any external reference.
             session["loot_list_message_id"] = new_loot_ids[0] if new_loot_ids else None
         except Exception:
-            pass
+            new_loot_ids = loot_ids
+
+        # Discord messages can't be reordered, so if the loot list grew and pushed
+        # new pages BELOW the control panel, editing the control panel in place
+        # would leave it stranded in the middle. In that case delete it and re-send
+        # it at the bottom so it stays second-to-last, right above the item picker.
+        must_recreate_ctrl = not _is_ordered_after(ctrl_ids, new_loot_ids)
+        if must_recreate_ctrl:
+            await _delete_message_list(ch, ctrl_ids)
+            ctrl_ids = []
 
         try:
-            new_ctrl_ids = await _sync_message_list(ch, ctrl_ids, control_pages, views=[ControlPanelView(session_id)] * len(control_pages))
+            new_ctrl_ids = await _sync_message_list(
+                ch, ctrl_ids, control_pages,
+                views=[ControlPanelView(session_id)] * len(control_pages)
+            )
             session["control_panel_message_ids"] = new_ctrl_ids
         except Exception:
-            pass
+            new_ctrl_ids = ctrl_ids
 
         await _reset_session_timeout(session_id)
 
@@ -1473,7 +1639,15 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
         item_text, _active = _item_message_text_and_active(session)
         view = ItemDropdownView(session_id)
 
-        if existing_item_msg and not delete_item:
+        # The item picker must stay at the very bottom. If the control panel was
+        # just re-sent below it (or the loot list grew past it), editing in place
+        # would strand it above them — force a fresh send instead.
+        picker_is_last = _is_ordered_after(
+            [existing_item_id] if existing_item_id else [],
+            list(new_loot_ids) + list(new_ctrl_ids)
+        )
+
+        if existing_item_msg and not delete_item and picker_is_last:
             try:
                 await existing_item_msg.edit(content=item_text, view=view)
                 session["item_dropdown_message_id"] = existing_item_id
@@ -1481,6 +1655,13 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             except Exception:
                 session["item_dropdown_message_id"] = None
                 existing_item_msg = None
+
+        if existing_item_msg:
+            try:
+                await existing_item_msg.delete()
+            except Exception:
+                pass
+            session["item_dropdown_message_id"] = None
 
         try:
             new_msg = await ch.send(item_text, view=view)
@@ -1652,18 +1833,10 @@ class LootModal(nextcord.ui.Modal):
             )
             return
 
-        try:
-            loot_msg = await interaction.followup.send("`Initializing Loot List (1/2)...`", wait=True)
-            control_msg = await interaction.channel.send("`Initializing Control Panel (2/2)...`")
-        except nextcord.Forbidden:
-            await interaction.followup.send(
-                "❌ I don't have permission to send messages in this channel. "
-                "Please ask a server admin to grant me **Send Messages** here, then try again.",
-                ephemeral=True
-            )
-            return
-
-        session_id = control_msg.id
+        # Build the session up front (ids filled in below) so the page builders can
+        # run before anything is sent — this lets us send messages in their final
+        # channel order (loot pages -> control panel -> item picker) instead of
+        # pre-sending placeholders and having overflow pages land out of order.
         session = {
             "rolls": rolls,
             "items": items,
@@ -1675,35 +1848,70 @@ class LootModal(nextcord.ui.Modal):
             "direction": 1,
             "just_reversed": False,
             "members_to_remove": None,
-            "channel_id": control_msg.channel.id,
-            "loot_list_message_ids": [loot_msg.id],
-            "loot_list_message_id": loot_msg.id,  # legacy single-id reference
-            "control_panel_message_ids": [control_msg.id],
+            "channel_id": interaction.channel.id,
+            "loot_list_message_ids": [],
+            "loot_list_message_id": None,
+            "control_panel_message_ids": [],
             "item_dropdown_message_id": None,
             "last_action": None,
             "timeout_task": None,
             "assignment_counter": 0
         }
-        loot_sessions[session_id] = session
-        await _reset_session_timeout(session_id)
 
-        # Send the initial (possibly multi-page) loot list and control panel.
-        loot_pages = build_loot_list_messages(session)
-        control_pages = build_control_panel_messages(session)
+        raw_loot_pages = build_loot_list_messages(session)
+        raw_control_pages = build_control_panel_messages(session)
+        loot_pages, control_pages = _assemble_session_messages(raw_loot_pages, raw_control_pages)
 
+        # Send loot list page(s) FIRST so they occupy the topmost slots.
         try:
-            new_loot_ids = await _sync_message_list(control_msg.channel, [loot_msg.id], loot_pages, views=None)
-            session["loot_list_message_ids"] = new_loot_ids
-            session["loot_list_message_id"] = new_loot_ids[0] if new_loot_ids else None
+            first_loot = await interaction.followup.send(loot_pages[0], wait=True)
+        except nextcord.Forbidden:
+            await interaction.followup.send(
+                "❌ I don't have permission to send messages in this channel. "
+                "Please ask a server admin to grant me **Send Messages** here, then try again.",
+                ephemeral=True
+            )
+            return
+
+        loot_ids = [first_loot.id]
+        try:
+            for body in loot_pages[1:]:
+                extra = await interaction.channel.send(body)
+                loot_ids.append(extra.id)
+        except nextcord.Forbidden:
+            pass
         except Exception:
             pass
 
+        # Then the control panel page(s), which land below the loot list.
         try:
-            new_ctrl_ids = await _sync_message_list(
-                control_msg.channel, [control_msg.id], control_pages,
-                views=[ControlPanelView(session_id)] * len(control_pages)
+            control_msgs = []
+            for body in control_pages:
+                control_msgs.append(await interaction.channel.send(body))
+        except nextcord.Forbidden:
+            await interaction.followup.send(
+                "❌ I don't have permission to send messages in this channel. "
+                "Please ask a server admin to grant me **Send Messages** here, then try again.",
+                ephemeral=True
             )
-            session["control_panel_message_ids"] = new_ctrl_ids
+            return
+
+        if not control_msgs:
+            await interaction.followup.send("❌ Failed to create the control panel.", ephemeral=True)
+            return
+
+        session_id = control_msgs[0].id
+        session["channel_id"] = control_msgs[0].channel.id
+        session["loot_list_message_ids"] = loot_ids
+        session["loot_list_message_id"] = loot_ids[0] if loot_ids else None
+        session["control_panel_message_ids"] = [m.id for m in control_msgs]
+        loot_sessions[session_id] = session
+        await _reset_session_timeout(session_id)
+
+        # Attach the interactive view now that session_id exists (it's keyed off
+        # the first control-panel message id).
+        try:
+            await control_msgs[-1].edit(content=control_pages[-1], view=ControlPanelView(session_id))
         except Exception:
             pass
 
