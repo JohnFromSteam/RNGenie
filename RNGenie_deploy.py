@@ -259,7 +259,9 @@ def _paginate_plain_sections(sections: list[str], limit: int = SAFE_CHUNK_LIMIT)
     """
     Greedily pack pre-built section strings (each itself a full ```ansi block or
     plain text block) into as few messages as possible, each under `limit` chars,
-    joined with a blank line. Never splits a section internally — if a single
+    joined with a single newline (not a blank line — code-block fences already get
+    visual padding from Discord's own rendering, so an extra blank line on top of
+    that reads as a doubled gap). Never splits a section internally — if a single
     section alone exceeds the limit, it is emitted on its own as an oversized chunk
     rather than being corrupted, since these sections are already safe-chunked
     upstream by _paginate_ansi_blocks.
@@ -270,9 +272,9 @@ def _paginate_plain_sections(sections: list[str], limit: int = SAFE_CHUNK_LIMIT)
 
     for sec in sections:
         sec_len = len(sec)
-        added_len = sec_len + (2 if current_parts else 0)  # "\n\n" join
+        added_len = sec_len + (1 if current_parts else 0)  # "\n" join
         if current_parts and (current_len + added_len) > limit:
-            messages.append("\n\n".join(current_parts))
+            messages.append("\n".join(current_parts))
             current_parts = [sec]
             current_len = sec_len
         else:
@@ -280,7 +282,7 @@ def _paginate_plain_sections(sections: list[str], limit: int = SAFE_CHUNK_LIMIT)
             current_len += added_len
 
     if current_parts:
-        messages.append("\n\n".join(current_parts))
+        messages.append("\n".join(current_parts))
     if not messages:
         messages.append("")
     return messages
@@ -314,25 +316,29 @@ def _pack_lines_into_ansi_blocks(line_groups: list[list[str]], limit: int = SAFE
     blocks: list[str] = []
     current_lines: list[str] = list(leading_header_lines) if leading_header_lines else []
     current_len = sum(len(l) + 1 for l in current_lines)
+    has_group_in_current = False  # tracks real groups placed, so a header alone doesn't force a blank line
 
     def _flush():
-        nonlocal current_lines, current_len
+        nonlocal current_lines, current_len, has_group_in_current
         if current_lines:
             blocks.append(fence_open + "\n".join(current_lines) + "\n" + fence_close)
         current_lines = []
         current_len = 0
+        has_group_in_current = False
 
     for gi, group in enumerate(line_groups):
         if not group:
             continue
         group_text_len = sum(len(l) + 1 for l in group)  # +1 per newline
-        separator_len = 1 if current_lines else 0  # blank line between groups
+        separator_len = 1 if has_group_in_current else 0  # blank line only between two groups, not after a bare header
 
         # If the group fits in the current block, add it.
         if current_lines and (current_len + separator_len + group_text_len + overhead) <= limit:
-            current_lines.append("")  # blank separator line
+            if has_group_in_current:
+                current_lines.append("")  # blank separator line, only between groups
             current_lines.extend(group)
             current_len += separator_len + group_text_len
+            has_group_in_current = True
             continue
 
         # If the group fits in a *fresh* block, flush and start a new one with it.
@@ -340,6 +346,7 @@ def _pack_lines_into_ansi_blocks(line_groups: list[list[str]], limit: int = SAFE
             _flush()
             current_lines = list(group)
             current_len = group_text_len
+            has_group_in_current = True
             continue
 
         # The group itself is too large even alone — split it line by line.
@@ -358,6 +365,7 @@ def _pack_lines_into_ansi_blocks(line_groups: list[list[str]], limit: int = SAFE
         if sub:
             current_lines = sub
             current_len = sub_len
+            has_group_in_current = True
 
     _flush()
     if not blocks:
