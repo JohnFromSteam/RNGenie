@@ -564,37 +564,50 @@ def _item_message_text_and_active(session: dict) -> tuple[str, bool]:
         )
     return (text, True)
 
-def _assemble_session_messages(control_pages: list[str], loot_pages: list[str]) -> tuple[list[str], list[str]]:
+def _assemble_session_messages(loot_pages: list[str], control_pages: list[str]) -> tuple[list[str], list[str]]:
     """
-    Combine the raw control-panel page bodies and raw loot-list page bodies into
+    Combine the raw loot-list page bodies and raw control-panel page bodies into
     their final, correctly-labeled text, with a SINGLE numbering scheme spanning
     the whole session (not two independent "(1/2)"/"(2/2)" labels).
 
-    Ordering: control panel pages come first (this is the primary panel with the
-    roll order and assignments), followed by loot-list pages, so that when extra
-    pages exist they're appended in a stable, predictable position in the channel
-    instead of the loot list's overflow pages landing between control panel pages
-    or after the item-picker message.
+    Channel order is: loot-list page(s) -> control panel page(s) -> item picker.
+    The control panel is kept second-to-last (immediately before the item picker)
+    because it holds the live roll order / assignments the picker needs in view,
+    so numbering runs loot pages first, then control pages.
 
-    Returns (labeled_control_pages, labeled_loot_pages) — same lengths as the
+    Returns (labeled_loot_pages, labeled_control_pages) — same lengths as the
     inputs, in the same relative order, just with the correct "(i/total)" label
     applied to each.
     """
-    total = len(control_pages) + len(loot_pages)
-
-    labeled_control = []
-    for i, body in enumerate(control_pages):
-        page_note = f" ({i+1}/{total})" if total > 1 else ""
-        labeled_control.append(f"**(2/2){page_note}**\n\n{body}" if i == 0 else f"**(2/2){page_note}**\n{body}")
+    total = len(loot_pages) + len(control_pages)
 
     labeled_loot = []
-    offset = len(control_pages)
     for i, body in enumerate(loot_pages):
-        n = offset + i
-        page_note = f" ({n+1}/{total})" if total > 1 else ""
+        page_note = f" ({i+1}/{total})" if total > 1 else ""
         labeled_loot.append(f"**(1/2){page_note}**\n{body}")
 
-    return labeled_control, labeled_loot
+    labeled_control = []
+    offset = len(loot_pages)
+    for i, body in enumerate(control_pages):
+        n = offset + i
+        page_note = f" ({n+1}/{total})" if total > 1 else ""
+        labeled_control.append(f"**(2/2){page_note}**\n\n{body}" if i == 0 else f"**(2/2){page_note}**\n{body}")
+
+    return labeled_loot, labeled_control
+
+def _is_ordered_after(later_ids: list[int], earlier_ids: list[int]) -> bool:
+    """
+    True if every id in `later_ids` was created after every id in `earlier_ids`.
+
+    Discord snowflake ids increase monotonically with creation time, so this is a
+    reliable way to check whether a group of messages currently sits *below*
+    another group in the channel. Messages can never be reordered in place, so
+    when this returns False the only way to restore the intended layout is to
+    delete and re-send the messages that need to move down.
+    """
+    if not later_ids or not earlier_ids:
+        return True
+    return min(later_ids) > max(earlier_ids)
 
 # ---------- Helper to sync a list of target messages against a list of desired contents ----------
 async def _sync_message_list(channel, existing_ids: list[int], desired_contents: list[str],
@@ -1542,7 +1555,7 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             await _reset_session_timeout(session_id)
 
             raw_final_ctrl_pages = build_control_panel_messages(session)
-            final_ctrl_pages, _empty_loot = _assemble_session_messages(raw_final_ctrl_pages, [])
+            _empty_loot, final_ctrl_pages = _assemble_session_messages([], raw_final_ctrl_pages)
             try:
                 new_ctrl_ids = await _sync_message_list(ch, ctrl_ids, final_ctrl_pages, views=None)
                 session["control_panel_message_ids"] = new_ctrl_ids
@@ -1578,28 +1591,38 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
 
             return
 
-        # Build current contents (each is now a LIST of raw page bodies), apply
-        # unified numbering across both lists, then sync CONTROL PANEL FIRST and
-        # LOOT LIST SECOND so any overflow pages land in a stable, predictable
-        # order in the channel: control panel page(s) -> loot list page(s) ->
-        # item picker (sent/edited below).
+        # Build current contents (each is now a LIST of raw page bodies) and apply
+        # unified numbering across both lists.
         raw_loot_pages = build_loot_list_messages(session)
         raw_control_pages = build_control_panel_messages(session)
-        control_pages, loot_pages = _assemble_session_messages(raw_control_pages, raw_loot_pages)
+        loot_pages, control_pages = _assemble_session_messages(raw_loot_pages, raw_control_pages)
 
-        try:
-            new_ctrl_ids = await _sync_message_list(ch, ctrl_ids, control_pages, views=[ControlPanelView(session_id)] * len(control_pages))
-            session["control_panel_message_ids"] = new_ctrl_ids
-        except Exception:
-            pass
-
+        # Sync the loot list first (it occupies the topmost slots).
         try:
             new_loot_ids = await _sync_message_list(ch, loot_ids, loot_pages, views=None)
             session["loot_list_message_ids"] = new_loot_ids
             # Keep legacy single-id field pointing at the first page for any external reference.
             session["loot_list_message_id"] = new_loot_ids[0] if new_loot_ids else None
         except Exception:
-            pass
+            new_loot_ids = loot_ids
+
+        # Discord messages can't be reordered, so if the loot list grew and pushed
+        # new pages BELOW the control panel, editing the control panel in place
+        # would leave it stranded in the middle. In that case delete it and re-send
+        # it at the bottom so it stays second-to-last, right above the item picker.
+        must_recreate_ctrl = not _is_ordered_after(ctrl_ids, new_loot_ids)
+        if must_recreate_ctrl:
+            await _delete_message_list(ch, ctrl_ids)
+            ctrl_ids = []
+
+        try:
+            new_ctrl_ids = await _sync_message_list(
+                ch, ctrl_ids, control_pages,
+                views=[ControlPanelView(session_id)] * len(control_pages)
+            )
+            session["control_panel_message_ids"] = new_ctrl_ids
+        except Exception:
+            new_ctrl_ids = ctrl_ids
 
         await _reset_session_timeout(session_id)
 
@@ -1616,7 +1639,15 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
         item_text, _active = _item_message_text_and_active(session)
         view = ItemDropdownView(session_id)
 
-        if existing_item_msg and not delete_item:
+        # The item picker must stay at the very bottom. If the control panel was
+        # just re-sent below it (or the loot list grew past it), editing in place
+        # would strand it above them — force a fresh send instead.
+        picker_is_last = _is_ordered_after(
+            [existing_item_id] if existing_item_id else [],
+            list(new_loot_ids) + list(new_ctrl_ids)
+        )
+
+        if existing_item_msg and not delete_item and picker_is_last:
             try:
                 await existing_item_msg.edit(content=item_text, view=view)
                 session["item_dropdown_message_id"] = existing_item_id
@@ -1624,6 +1655,13 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
             except Exception:
                 session["item_dropdown_message_id"] = None
                 existing_item_msg = None
+
+        if existing_item_msg:
+            try:
+                await existing_item_msg.delete()
+            except Exception:
+                pass
+            session["item_dropdown_message_id"] = None
 
         try:
             new_msg = await ch.send(item_text, view=view)
@@ -1795,18 +1833,10 @@ class LootModal(nextcord.ui.Modal):
             )
             return
 
-        try:
-            loot_msg = await interaction.followup.send("`Initializing Loot List...`", wait=True)
-            control_msg = await interaction.channel.send("`Initializing Control Panel...`")
-        except nextcord.Forbidden:
-            await interaction.followup.send(
-                "❌ I don't have permission to send messages in this channel. "
-                "Please ask a server admin to grant me **Send Messages** here, then try again.",
-                ephemeral=True
-            )
-            return
-
-        session_id = control_msg.id
+        # Build the session up front (ids filled in below) so the page builders can
+        # run before anything is sent — this lets us send messages in their final
+        # channel order (loot pages -> control panel -> item picker) instead of
+        # pre-sending placeholders and having overflow pages land out of order.
         session = {
             "rolls": rolls,
             "items": items,
@@ -1818,40 +1848,70 @@ class LootModal(nextcord.ui.Modal):
             "direction": 1,
             "just_reversed": False,
             "members_to_remove": None,
-            "channel_id": control_msg.channel.id,
-            "loot_list_message_ids": [loot_msg.id],
-            "loot_list_message_id": loot_msg.id,  # legacy single-id reference
-            "control_panel_message_ids": [control_msg.id],
+            "channel_id": interaction.channel.id,
+            "loot_list_message_ids": [],
+            "loot_list_message_id": None,
+            "control_panel_message_ids": [],
             "item_dropdown_message_id": None,
             "last_action": None,
             "timeout_task": None,
             "assignment_counter": 0
         }
-        loot_sessions[session_id] = session
-        await _reset_session_timeout(session_id)
 
-        # Build raw page bodies, then apply unified numbering across BOTH lists so
-        # labels reflect real total message count, not a hardcoded "1/2"/"2/2".
         raw_loot_pages = build_loot_list_messages(session)
         raw_control_pages = build_control_panel_messages(session)
-        control_pages, loot_pages = _assemble_session_messages(raw_control_pages, raw_loot_pages)
+        loot_pages, control_pages = _assemble_session_messages(raw_loot_pages, raw_control_pages)
 
-        # Sync the control panel FIRST, then the loot list, so any overflow pages
-        # from either one land in a stable, predictable order in the channel:
-        # control panel page(s) -> loot list page(s) -> item picker (sent later).
+        # Send loot list page(s) FIRST so they occupy the topmost slots.
         try:
-            new_ctrl_ids = await _sync_message_list(
-                control_msg.channel, [control_msg.id], control_pages,
-                views=[ControlPanelView(session_id)] * len(control_pages)
+            first_loot = await interaction.followup.send(loot_pages[0], wait=True)
+        except nextcord.Forbidden:
+            await interaction.followup.send(
+                "❌ I don't have permission to send messages in this channel. "
+                "Please ask a server admin to grant me **Send Messages** here, then try again.",
+                ephemeral=True
             )
-            session["control_panel_message_ids"] = new_ctrl_ids
+            return
+
+        loot_ids = [first_loot.id]
+        try:
+            for body in loot_pages[1:]:
+                extra = await interaction.channel.send(body)
+                loot_ids.append(extra.id)
+        except nextcord.Forbidden:
+            pass
         except Exception:
             pass
 
+        # Then the control panel page(s), which land below the loot list.
         try:
-            new_loot_ids = await _sync_message_list(control_msg.channel, [loot_msg.id], loot_pages, views=None)
-            session["loot_list_message_ids"] = new_loot_ids
-            session["loot_list_message_id"] = new_loot_ids[0] if new_loot_ids else None
+            control_msgs = []
+            for body in control_pages:
+                control_msgs.append(await interaction.channel.send(body))
+        except nextcord.Forbidden:
+            await interaction.followup.send(
+                "❌ I don't have permission to send messages in this channel. "
+                "Please ask a server admin to grant me **Send Messages** here, then try again.",
+                ephemeral=True
+            )
+            return
+
+        if not control_msgs:
+            await interaction.followup.send("❌ Failed to create the control panel.", ephemeral=True)
+            return
+
+        session_id = control_msgs[0].id
+        session["channel_id"] = control_msgs[0].channel.id
+        session["loot_list_message_ids"] = loot_ids
+        session["loot_list_message_id"] = loot_ids[0] if loot_ids else None
+        session["control_panel_message_ids"] = [m.id for m in control_msgs]
+        loot_sessions[session_id] = session
+        await _reset_session_timeout(session_id)
+
+        # Attach the interactive view now that session_id exists (it's keyed off
+        # the first control-panel message id).
+        try:
+            await control_msgs[-1].edit(content=control_pages[-1], view=ControlPanelView(session_id))
         except Exception:
             pass
 
