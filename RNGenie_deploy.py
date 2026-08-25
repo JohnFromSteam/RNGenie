@@ -285,7 +285,8 @@ def _paginate_plain_sections(sections: list[str], limit: int = SAFE_CHUNK_LIMIT)
         messages.append("")
     return messages
 
-def _pack_lines_into_ansi_blocks(line_groups: list[list[str]], limit: int = SAFE_CHUNK_LIMIT) -> list[str]:
+def _pack_lines_into_ansi_blocks(line_groups: list[list[str]], limit: int = SAFE_CHUNK_LIMIT,
+                                  leading_header_lines: list[str] | None = None) -> list[str]:
     """
     Pack multiple pre-built "groups" of lines (e.g. one group per player, where
     each group's first line is a header like a name, followed by its item lines)
@@ -294,6 +295,12 @@ def _pack_lines_into_ansi_blocks(line_groups: list[list[str]], limit: int = SAFE
 
     This is what keeps consecutive players visually tight (one blank line) instead
     of the large gap Discord renders around adjacent ```...``` fences.
+
+    If leading_header_lines is given, those lines are baked directly into the very
+    FIRST returned block (ahead of the first group, no blank-line gap after them,
+    just a normal line break) instead of being a separate section — this is what
+    keeps a section title like "✅ Assigned Items ✅" glued to the first player
+    instead of floating in its own fenced box.
 
     Each returned string is a complete ```ansi ... ``` block, kept under `limit`
     characters. If a single group is so large it can't fit even in an empty block,
@@ -305,8 +312,8 @@ def _pack_lines_into_ansi_blocks(line_groups: list[list[str]], limit: int = SAFE
     overhead = len(fence_open) + len(fence_close) + 1  # +1 for the trailing newline before fence_close
 
     blocks: list[str] = []
-    current_lines: list[str] = []
-    current_len = 0
+    current_lines: list[str] = list(leading_header_lines) if leading_header_lines else []
+    current_len = sum(len(l) + 1 for l in current_lines)
 
     def _flush():
         nonlocal current_lines, current_len
@@ -412,12 +419,17 @@ def build_last_assigned_messages(session: dict) -> list[str]:
         messages.append(f"**(1/2){page_note}**\n{block}")
     return messages
 
-def _build_assigned_sections(session: dict) -> list[str]:
+def _build_assigned_sections(session: dict, section_header_lines: list[str] | None = None) -> list[str]:
     """
     Build the assigned-items list as one or more ```ansi blocks, packing AS MANY
     players as possible into each block (separated by a single blank line) rather
     than giving every player their own code fence. This is what removes the large
     visual gaps between players that Discord renders around adjacent ``` fences.
+
+    If section_header_lines is given (e.g. the "✅ Assigned Items ✅" title +
+    divider), it's baked into the first returned block rather than becoming its
+    own separate fenced section — otherwise the title would float in its own box
+    with a gap before the first player, same problem as the player-to-player gaps.
 
     Still safely overflows a single oversized player into its own block(s) if
     needed. Returns a list of complete ```ansi ... ``` blocks ready to be packed
@@ -438,7 +450,7 @@ def _build_assigned_sections(session: dict) -> list[str]:
         item_lines = [f"- {nm}" for nm in items] if items else ["- N/A"]
         line_groups.append([header_line] + item_lines)
 
-    return _pack_lines_into_ansi_blocks(line_groups)
+    return _pack_lines_into_ansi_blocks(line_groups, leading_header_lines=section_header_lines)
 
 def build_control_panel_messages(session: dict) -> list[str]:
     """
@@ -452,13 +464,8 @@ def build_control_panel_messages(session: dict) -> list[str]:
     roll_lines = _build_roll_lines(session).split("\n") if session["rolls"] else []
     roll_blocks = _paginate_ansi_blocks(roll_header, roll_lines)
 
-    assigned_header_block = (
-        "```ansi\n"
-        f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}\n"
-        "==================================\n"
-        "```"
-    )
-    assigned_sections = _build_assigned_sections(session)
+    assigned_header_lines = [f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}", "=================================="]
+    assigned_sections = _build_assigned_sections(session, section_header_lines=assigned_header_lines)
 
     indicator = ""
     if 0 <= session["current_turn"] < len(session["rolls"]):
@@ -474,9 +481,9 @@ def build_control_panel_messages(session: dict) -> list[str]:
         except Exception:
             pass
 
-    # Pack: [header text] + roll_blocks + [assigned_header_block] + assigned_sections + [indicator]
-    # into as few messages as possible, respecting the limit.
-    all_sections = list(roll_blocks) + [assigned_header_block] + assigned_sections
+    # Pack: [header text] + roll_blocks + assigned_sections (title baked into the
+    # first assigned block) + [indicator] into as few messages as possible.
+    all_sections = list(roll_blocks) + assigned_sections
     packed = _paginate_plain_sections(all_sections, limit=SAFE_CHUNK_LIMIT)
 
     messages = []
@@ -504,13 +511,8 @@ def build_final_summary_messages(session: dict, timed_out: bool = False) -> list
     roll_lines = _build_roll_lines(session).split("\n") if session["rolls"] else []
     roll_blocks = _paginate_ansi_blocks(roll_header, roll_lines)
 
-    assigned_header_block = (
-        "```ansi\n"
-        f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}\n"
-        "==================================\n"
-        "```"
-    )
-    assigned_sections = _build_assigned_sections(session)
+    assigned_header_lines = [f"{GREEN}{BOLD}✅ Assigned Items ✅{RESET}", "=================================="]
+    assigned_sections = _build_assigned_sections(session, section_header_lines=assigned_header_lines)
 
     unclaimed = [it for it in session["items"] if it["assigned_to"] is None]
     unclaimed_blocks = []
@@ -519,7 +521,7 @@ def build_final_summary_messages(session: dict, timed_out: bool = False) -> list
         unclaimed_lines = [f"{RED}{it['display_number']}.{RESET} {it['name']}" for it in unclaimed]
         unclaimed_blocks = _paginate_ansi_blocks(unclaimed_header, unclaimed_lines)
 
-    all_sections = list(roll_blocks) + [assigned_header_block] + assigned_sections + unclaimed_blocks
+    all_sections = list(roll_blocks) + assigned_sections + unclaimed_blocks
     packed = _paginate_plain_sections(all_sections, limit=SAFE_CHUNK_LIMIT)
 
     messages = []
