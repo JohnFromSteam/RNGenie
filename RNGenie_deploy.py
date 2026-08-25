@@ -285,6 +285,78 @@ def _paginate_plain_sections(sections: list[str], limit: int = SAFE_CHUNK_LIMIT)
         messages.append("")
     return messages
 
+def _pack_lines_into_ansi_blocks(line_groups: list[list[str]], limit: int = SAFE_CHUNK_LIMIT) -> list[str]:
+    """
+    Pack multiple pre-built "groups" of lines (e.g. one group per player, where
+    each group's first line is a header like a name, followed by its item lines)
+    into as FEW ```ansi blocks as possible, separating groups with a single blank
+    line WITHIN the same code block instead of closing/reopening a fence per group.
+
+    This is what keeps consecutive players visually tight (one blank line) instead
+    of the large gap Discord renders around adjacent ```...``` fences.
+
+    Each returned string is a complete ```ansi ... ``` block, kept under `limit`
+    characters. If a single group is so large it can't fit even in an empty block,
+    it is split across multiple blocks (falling back to raw line packing) rather
+    than dropped.
+    """
+    fence_open = "```ansi\n"
+    fence_close = "```"
+    overhead = len(fence_open) + len(fence_close) + 1  # +1 for the trailing newline before fence_close
+
+    blocks: list[str] = []
+    current_lines: list[str] = []
+    current_len = 0
+
+    def _flush():
+        nonlocal current_lines, current_len
+        if current_lines:
+            blocks.append(fence_open + "\n".join(current_lines) + "\n" + fence_close)
+        current_lines = []
+        current_len = 0
+
+    for gi, group in enumerate(line_groups):
+        if not group:
+            continue
+        group_text_len = sum(len(l) + 1 for l in group)  # +1 per newline
+        separator_len = 1 if current_lines else 0  # blank line between groups
+
+        # If the group fits in the current block, add it.
+        if current_lines and (current_len + separator_len + group_text_len + overhead) <= limit:
+            current_lines.append("")  # blank separator line
+            current_lines.extend(group)
+            current_len += separator_len + group_text_len
+            continue
+
+        # If the group fits in a *fresh* block, flush and start a new one with it.
+        if group_text_len + overhead <= limit:
+            _flush()
+            current_lines = list(group)
+            current_len = group_text_len
+            continue
+
+        # The group itself is too large even alone — split it line by line.
+        _flush()
+        sub: list[str] = []
+        sub_len = 0
+        for line in group:
+            line_len = len(line) + 1
+            if sub and (sub_len + line_len + overhead) > limit:
+                blocks.append(fence_open + "\n".join(sub) + "\n" + fence_close)
+                sub = [line]
+                sub_len = line_len
+            else:
+                sub.append(line)
+                sub_len += line_len
+        if sub:
+            current_lines = sub
+            current_len = sub_len
+
+    _flush()
+    if not blocks:
+        blocks.append(fence_open + fence_close)
+    return blocks
+
 # ---------- Message builders (use ANSI for colored output) ----------
 def build_loot_list_messages(session: dict) -> list[str]:
     """
@@ -342,10 +414,14 @@ def build_last_assigned_messages(session: dict) -> list[str]:
 
 def _build_assigned_sections(session: dict) -> list[str]:
     """
-    Build one ```ansi block PER PLAYER for the assigned-items list, each individually
-    paginated so a single player with a huge number of assigned items still can't
-    blow the 2000-char limit. Returns a list of complete ```ansi ... ``` blocks
-    (one or more per player) ready to be packed into messages.
+    Build the assigned-items list as one or more ```ansi blocks, packing AS MANY
+    players as possible into each block (separated by a single blank line) rather
+    than giving every player their own code fence. This is what removes the large
+    visual gaps between players that Discord renders around adjacent ``` fences.
+
+    Still safely overflows a single oversized player into its own block(s) if
+    needed. Returns a list of complete ```ansi ... ``` blocks ready to be packed
+    into messages.
     """
     assigned_items = [it for it in session["items"] if it["assigned_to"]]
     assigned_items.sort(key=lambda x: x.get("assigned_order", 0))
@@ -354,15 +430,15 @@ def _build_assigned_sections(session: dict) -> list[str]:
     for it in assigned_items:
         assigned_map.setdefault(it["assigned_to"], []).append(it["name"])
 
-    sections = []
+    line_groups: list[list[str]] = []
     for i, r in enumerate(session["rolls"]):
         emoji = NUMBER_EMOJIS.get(i + 1, f"#{i+1}")
-        header = [f"{BLUE}{emoji} {r['member'].display_name}{RESET}"]
+        header_line = f"{BLUE}{emoji} {r['member'].display_name}{RESET}"
         items = assigned_map.get(r["member"].id, [])
-        lines = [f"- {nm}" for nm in items] if items else ["- N/A"]
-        # Each player's own block, safely chunked if absurdly long.
-        sections.extend(_paginate_ansi_blocks(header, lines))
-    return sections
+        item_lines = [f"- {nm}" for nm in items] if items else ["- N/A"]
+        line_groups.append([header_line] + item_lines)
+
+    return _pack_lines_into_ansi_blocks(line_groups)
 
 def build_control_panel_messages(session: dict) -> list[str]:
     """
