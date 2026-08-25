@@ -375,10 +375,13 @@ def _pack_lines_into_ansi_blocks(line_groups: list[list[str]], limit: int = SAFE
 # ---------- Message builders (use ANSI for colored output) ----------
 def build_loot_list_messages(session: dict) -> list[str]:
     """
-    Build the 'loot list' message(s). Returns a LIST of message strings because
-    the remaining-items list can exceed Discord's 2000-char limit when there are
-    many items; in that case it is split across multiple messages instead of
-    being truncated.
+    Build the 'loot list' message body/bodies (NOT including any page-number label —
+    callers that assemble the full session message sequence apply unified numbering
+    across ALL session messages, since this list's page count depends on item count
+    and must be numbered relative to the control panel pages too).
+    Returns a LIST of message strings because the remaining-items list can exceed
+    Discord's 2000-char limit when there are many items; in that case it is split
+    across multiple messages instead of being truncated.
     """
     remaining = [it for it in session["items"] if it["assigned_to"] is None]
     if remaining:
@@ -393,13 +396,7 @@ def build_loot_list_messages(session: dict) -> list[str]:
             "All items have been distributed.\n"
             "```"
         ]
-
-    messages = []
-    total = len(blocks)
-    for i, block in enumerate(blocks):
-        page_note = f" ({i+1}/{total})" if total > 1 else ""
-        messages.append(f"**(1/2){page_note}**\n{block}")
-    return messages
+    return blocks
 
 def build_last_assigned_messages(session: dict) -> list[str]:
     """
@@ -462,12 +459,10 @@ def _build_assigned_sections(session: dict, section_header_lines: list[str] | No
 
 def build_control_panel_messages(session: dict) -> list[str]:
     """
-    Build the control panel message(s) (2/2): roll order + assigned items + status.
-    Returns a LIST because assigned items across many players can exceed 2000 chars;
-    everything after the first message is sent as continuation pages.
+    Build the control panel message body/bodies: roll order + assigned items + status.
+    Returns a LIST (NOT including any page-number label — see build_loot_list_messages
+    for why numbering is applied later, across the whole session's messages).
     """
-    header = f"**(2/2)**\n\n✍️ **Loot Manager:** {session['invoker'].mention}\n\n"
-
     roll_header = [f"{YELLOW}{BOLD}🎲 Roll Order 🎲{RESET}", "=================================="]
     roll_lines = _build_roll_lines(session).split("\n") if session["rolls"] else []
     roll_blocks = _paginate_ansi_blocks(roll_header, roll_lines)
@@ -489,20 +484,17 @@ def build_control_panel_messages(session: dict) -> list[str]:
         except Exception:
             pass
 
-    # Pack: [header text] + roll_blocks + assigned_sections (title baked into the
-    # first assigned block) + [indicator] into as few messages as possible.
+    # Pack: roll_blocks + assigned_sections (title baked into the first assigned
+    # block) into as few messages as possible.
     all_sections = list(roll_blocks) + assigned_sections
     packed = _paginate_plain_sections(all_sections, limit=SAFE_CHUNK_LIMIT)
 
     messages = []
-    total = len(packed)
     for i, chunk in enumerate(packed):
         if i == 0:
-            page_note = f" ({i+1}/{total})" if total > 1 else ""
-            messages.append(f"**(2/2){page_note}**\n\n✍️ **Loot Manager:** {session['invoker'].mention}\n\n{chunk}")
+            messages.append(f"✍️ **Loot Manager:** {session['invoker'].mention}\n\n{chunk}")
         else:
-            page_note = f" ({i+1}/{total})"
-            messages.append(f"**(2/2){page_note}**\n{chunk}")
+            messages.append(chunk)
     # Indicator goes on the last page only.
     messages[-1] = messages[-1] + indicator
     return messages
@@ -541,6 +533,14 @@ def build_final_summary_messages(session: dict, timed_out: bool = False) -> list
             messages.append(chunk)
     return messages
 
+# Discord hard-caps a View to 5 action rows; two rows are reserved for buttons
+# (Assign/Skip/Skip Remaining on one row, Undo/Add Item on the other), leaving 3
+# rows for item Select menus. Each Select holds at most 25 options, so at most
+# 75 items can be shown as choosable at once. Anything beyond that genuinely
+# can't fit in this UI shape — flagged in the picker message rather than silently
+# dropped, so the Loot Manager knows to use "Add Item" removal or split the pool.
+MAX_DROPDOWN_ITEMS = 75
+
 def _item_message_text_and_active(session: dict) -> tuple[str, bool]:
     """
     Returns tuple (message_text, is_active) for the 'item picker' message.
@@ -553,7 +553,48 @@ def _item_message_text_and_active(session: dict) -> tuple[str, bool]:
     picker = session["rolls"][session["current_turn"]]["member"]
     emoji = NUMBER_EMOJIS.get(session["current_turn"] + 1, "👉")
     turn_text = "turn!" if not session.get("just_reversed", False) else "turn (direction reversed)!"
-    return (f"**{emoji} {picker.mention}'s {turn_text}**\n\nChoose item(s) below:", True)
+    text = f"**{emoji} {picker.mention}'s {turn_text}**\n\nChoose item(s) below:"
+
+    available_count = sum(1 for it in session["items"] if it["assigned_to"] is None)
+    if available_count > MAX_DROPDOWN_ITEMS:
+        hidden = available_count - MAX_DROPDOWN_ITEMS
+        text += (
+            f"\n\n⚠️ *Showing the first {MAX_DROPDOWN_ITEMS} items — "
+            f"{hidden} more are waiting and will appear once earlier items are assigned.*"
+        )
+    return (text, True)
+
+def _assemble_session_messages(control_pages: list[str], loot_pages: list[str]) -> tuple[list[str], list[str]]:
+    """
+    Combine the raw control-panel page bodies and raw loot-list page bodies into
+    their final, correctly-labeled text, with a SINGLE numbering scheme spanning
+    the whole session (not two independent "(1/2)"/"(2/2)" labels).
+
+    Ordering: control panel pages come first (this is the primary panel with the
+    roll order and assignments), followed by loot-list pages, so that when extra
+    pages exist they're appended in a stable, predictable position in the channel
+    instead of the loot list's overflow pages landing between control panel pages
+    or after the item-picker message.
+
+    Returns (labeled_control_pages, labeled_loot_pages) — same lengths as the
+    inputs, in the same relative order, just with the correct "(i/total)" label
+    applied to each.
+    """
+    total = len(control_pages) + len(loot_pages)
+
+    labeled_control = []
+    for i, body in enumerate(control_pages):
+        page_note = f" ({i+1}/{total})" if total > 1 else ""
+        labeled_control.append(f"**(2/2){page_note}**\n\n{body}" if i == 0 else f"**(2/2){page_note}**\n{body}")
+
+    labeled_loot = []
+    offset = len(control_pages)
+    for i, body in enumerate(loot_pages):
+        n = offset + i
+        page_note = f" ({n+1}/{total})" if total > 1 else ""
+        labeled_loot.append(f"**(1/2){page_note}**\n{body}")
+
+    return labeled_control, labeled_loot
 
 # ---------- Helper to sync a list of target messages against a list of desired contents ----------
 async def _sync_message_list(channel, existing_ids: list[int], desired_contents: list[str],
@@ -729,7 +770,8 @@ class ItemDropdownView(nextcord.ui.View):
         chunks = [available[i:i+25] for i in range(0, len(available), 25)]
         selected = set(session.get("selected_items") or [])
 
-        dropdown_count = min(len(chunks), 3)
+        max_dropdowns = MAX_DROPDOWN_ITEMS // 25  # 3 rows worth of Select menus (see MAX_DROPDOWN_ITEMS)
+        dropdown_count = min(len(chunks), max_dropdowns)
 
         for ci in range(dropdown_count):
             chunk = chunks[ci]
@@ -1499,10 +1541,20 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
         if not _are_items_left(session) and session["current_turn"] != TURN_NOT_STARTED:
             await _reset_session_timeout(session_id)
 
-            final_ctrl_pages = build_control_panel_messages(session)
+            raw_final_ctrl_pages = build_control_panel_messages(session)
+            final_ctrl_pages, _empty_loot = _assemble_session_messages(raw_final_ctrl_pages, [])
             try:
                 new_ctrl_ids = await _sync_message_list(ch, ctrl_ids, final_ctrl_pages, views=None)
                 session["control_panel_message_ids"] = new_ctrl_ids
+            except Exception:
+                pass
+
+            # No remaining-items page is relevant once distribution is complete —
+            # remove any leftover loot-list pages from the channel.
+            try:
+                await _delete_message_list(ch, loot_ids)
+                session["loot_list_message_ids"] = []
+                session["loot_list_message_id"] = None
             except Exception:
                 pass
 
@@ -1526,21 +1578,26 @@ async def _refresh_all_messages(session_id: int, delete_item: bool = True):
 
             return
 
-        # Build current contents (each is now a LIST of pages) and sync.
-        loot_pages = build_loot_list_messages(session)
-        control_pages = build_control_panel_messages(session)
+        # Build current contents (each is now a LIST of raw page bodies), apply
+        # unified numbering across both lists, then sync CONTROL PANEL FIRST and
+        # LOOT LIST SECOND so any overflow pages land in a stable, predictable
+        # order in the channel: control panel page(s) -> loot list page(s) ->
+        # item picker (sent/edited below).
+        raw_loot_pages = build_loot_list_messages(session)
+        raw_control_pages = build_control_panel_messages(session)
+        control_pages, loot_pages = _assemble_session_messages(raw_control_pages, raw_loot_pages)
+
+        try:
+            new_ctrl_ids = await _sync_message_list(ch, ctrl_ids, control_pages, views=[ControlPanelView(session_id)] * len(control_pages))
+            session["control_panel_message_ids"] = new_ctrl_ids
+        except Exception:
+            pass
 
         try:
             new_loot_ids = await _sync_message_list(ch, loot_ids, loot_pages, views=None)
             session["loot_list_message_ids"] = new_loot_ids
             # Keep legacy single-id field pointing at the first page for any external reference.
             session["loot_list_message_id"] = new_loot_ids[0] if new_loot_ids else None
-        except Exception:
-            pass
-
-        try:
-            new_ctrl_ids = await _sync_message_list(ch, ctrl_ids, control_pages, views=[ControlPanelView(session_id)] * len(control_pages))
-            session["control_panel_message_ids"] = new_ctrl_ids
         except Exception:
             pass
 
@@ -1739,8 +1796,8 @@ class LootModal(nextcord.ui.Modal):
             return
 
         try:
-            loot_msg = await interaction.followup.send("`Initializing Loot List (1/2)...`", wait=True)
-            control_msg = await interaction.channel.send("`Initializing Control Panel (2/2)...`")
+            loot_msg = await interaction.followup.send("`Initializing Loot List...`", wait=True)
+            control_msg = await interaction.channel.send("`Initializing Control Panel...`")
         except nextcord.Forbidden:
             await interaction.followup.send(
                 "❌ I don't have permission to send messages in this channel. "
@@ -1773,23 +1830,28 @@ class LootModal(nextcord.ui.Modal):
         loot_sessions[session_id] = session
         await _reset_session_timeout(session_id)
 
-        # Send the initial (possibly multi-page) loot list and control panel.
-        loot_pages = build_loot_list_messages(session)
-        control_pages = build_control_panel_messages(session)
+        # Build raw page bodies, then apply unified numbering across BOTH lists so
+        # labels reflect real total message count, not a hardcoded "1/2"/"2/2".
+        raw_loot_pages = build_loot_list_messages(session)
+        raw_control_pages = build_control_panel_messages(session)
+        control_pages, loot_pages = _assemble_session_messages(raw_control_pages, raw_loot_pages)
 
-        try:
-            new_loot_ids = await _sync_message_list(control_msg.channel, [loot_msg.id], loot_pages, views=None)
-            session["loot_list_message_ids"] = new_loot_ids
-            session["loot_list_message_id"] = new_loot_ids[0] if new_loot_ids else None
-        except Exception:
-            pass
-
+        # Sync the control panel FIRST, then the loot list, so any overflow pages
+        # from either one land in a stable, predictable order in the channel:
+        # control panel page(s) -> loot list page(s) -> item picker (sent later).
         try:
             new_ctrl_ids = await _sync_message_list(
                 control_msg.channel, [control_msg.id], control_pages,
                 views=[ControlPanelView(session_id)] * len(control_pages)
             )
             session["control_panel_message_ids"] = new_ctrl_ids
+        except Exception:
+            pass
+
+        try:
+            new_loot_ids = await _sync_message_list(control_msg.channel, [loot_msg.id], loot_pages, views=None)
+            session["loot_list_message_ids"] = new_loot_ids
+            session["loot_list_message_id"] = new_loot_ids[0] if new_loot_ids else None
         except Exception:
             pass
 
